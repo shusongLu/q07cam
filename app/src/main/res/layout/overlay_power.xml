@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:background="#CC0A0E12"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:id="@+id/tvOverlayPower"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="0.0 kW"
+        android:textColor="#FF8AE234"
+        android:textSize="34sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/tvOverlayRpm"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textColor="#FFFCE94F"
+        android:textSize="20sp" />
+
+    <TextView
+        android:id="@+id/tvOverlaySoc"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:textColor="#FF9AA0A6"
+        android:textSize="12sp" />
+
+</LinearLayout>

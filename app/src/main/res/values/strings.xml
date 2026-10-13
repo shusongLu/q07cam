@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Q07 电池功率（壳）</string>
+    <string name="plugin_loading">插件加载中…</string>
+    <string name="displays_title">已枚举的屏幕 (Display)：</string>
+    <string name="btn_reload_plugin">重新加载插件（热更生效）</string>
+    <string name="btn_refresh_displays">刷新屏幕列表</string>
+    <string name="btn_presentation">投屏到副驾屏（Presentation）</string>
+    <string name="btn_overlay">开启实时功率悬浮窗</string>
+    <string name="turn_placeholder">侧摄像头画面\n（占位：AVM 接口确认后替换）</string>
+</resources>
