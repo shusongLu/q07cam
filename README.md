@@ -116,6 +116,10 @@ powershell -ExecutionPolicy Bypass -File .\tools\build-plugin-dex.ps1 -Push -Ser
 .\gradlew.bat --offline clean :app:assembleDebug   # 应 BUILD SUCCESSFUL
 ```
 
+> **SDK 定位**：`app` 走 `local.properties`；`core`/`plugin` 编译期需要 `android.jar`，
+> 定位顺序为 `ANDROID_HOME` → `ANDROID_SDK_ROOT` → 本仓库 `local.properties` 的 `sdk.dir`。
+> 本机没设 `ANDROID_HOME`，只靠 `local.properties` 也能离线构建（无需手动 export）。
+
 | 组件 | 位置 |
 |---|---|
 | JDK 21 | `C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot` |
@@ -150,6 +154,9 @@ powershell -ExecutionPolicy Bypass -File .\adbrecon.ps1 -Connect <IP:端口> -Tu
 4. **执行策略**：默认禁止跑 .ps1（见上）。
 5. `Display.Mode` 没有 `width/height`，要用 `physicalWidth/physicalHeight`。
 6. 无线 ADB：`adb mdns services` 看真实端口——**配对端口 ≠ 连接端口**。
+7. **`core`/`plugin` 也要 Android SDK**：这两块编译期需要 `android.jar`，定位顺序为
+   `ANDROID_HOME` → `ANDROID_SDK_ROOT` → 本仓库 `local.properties` 的 `sdk.dir`；
+   只设 `local.properties` 即可离线构建。三处都缺会报「找不到 Android SDK」。
 
 ---
 
