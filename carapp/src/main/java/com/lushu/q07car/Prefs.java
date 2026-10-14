@@ -25,6 +25,9 @@ public class Prefs {
     public static final String KEY_THEME = "theme";
     // 副驾屏（DisplayManager 的 displayId，-1 = 关闭）
     public static final String KEY_AUX_DISPLAY = "aux_display";
+    // 功能开关
+    public static final String KEY_SHOW_PANEL = "show_panel";
+    public static final String KEY_SHOW_CAMERA = "show_camera";
     // 开机自启
     public static final String KEY_BOOT = "boot";
 

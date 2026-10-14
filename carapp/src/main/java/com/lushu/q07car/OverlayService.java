@@ -65,6 +65,8 @@ public class OverlayService extends Service {
     private int panelX, panelY, panelW, panelH;
     private int camX, camY, camW, camH;
     private boolean editMode;
+    private boolean showPanel = true;
+    private boolean showCamera = true;
 
     /** 编辑模式下的抓手尺寸 */
     private static final int HANDLE_DP = 44;
@@ -172,7 +174,7 @@ public class OverlayService extends Service {
             tvMain.setOnTouchListener(new DragTouch(0));
         }
         try {
-            wm.addView(tvMain, lp);
+            if (showPanel) wm.addView(tvMain, lp);
         } catch (Throwable t) {
             Log.e(TAG, "面板窗口失败（多半没有『显示在其他应用上层』权限）: " + t);
         }
@@ -263,6 +265,8 @@ public class OverlayService extends Service {
         camW = Prefs.getInt(this, Prefs.KEY_CAM_W, Prefs.DEF_CAM_W);
         camH = Prefs.getInt(this, Prefs.KEY_CAM_H, Prefs.DEF_CAM_H);
         editMode = Prefs.getBool(this, Prefs.KEY_EDIT, false);
+        showPanel = Prefs.getBool(this, Prefs.KEY_SHOW_PANEL, true);
+        showCamera = Prefs.getBool(this, Prefs.KEY_SHOW_CAMERA, true);
 
         Log.i(TAG, "[cam] 预连=" + p + "(mask=" + preMask + ")  面板=" + panelX + "," + panelY
                 + " " + panelW + "x" + panelH + "  摄像头=" + camX + "," + camY + " " + camW + "x" + camH
@@ -562,7 +566,7 @@ public class OverlayService extends Service {
 
     private void updateCamera() {
         if (wm == null) return;
-        int turn = turnState();
+        int turn = showCamera ? turnState() : 0;
         int want = (turn == 1) ? SIDE_LEFT : (turn == 2) ? SIDE_RIGHT : -1;
 
         if (want < 0) {

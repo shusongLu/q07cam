@@ -247,8 +247,18 @@ public class MainActivity extends Activity {
         addWide(btnRow, bPerm, 1f);
 
         LinearLayout lay = card(page, "布局");
-        note(lay, "打开编辑后：拖动面板 / 摄像头窗口可移动；拖摄像头右下角方块可缩放。\n"
-                + "关掉后窗口恢复「穿透」，不再挡触摸。位置和大小会自动保存。");
+        Switch panelSw = new Switch(this);
+        styleSwitch(panelSw, "显示数据面板");
+        panelSw.setChecked(Prefs.getBool(this, Prefs.KEY_SHOW_PANEL, true));
+        panelSw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override public void onCheckedChanged(CompoundButton b, boolean checked) {
+                Prefs.putBool(MainActivity.this, Prefs.KEY_SHOW_PANEL, checked);
+                restartService();
+            }
+        });
+        lay.addView(panelSw);
+        note(lay, "关掉后屏幕上不再显示数据面板（服务仍在后台读数据，App 页面的实时数据照常刷新）。");
+
         Switch editSw = new Switch(this);
         styleSwitch(editSw, "编辑布局（可拖动 / 缩放）");
         editSw.setChecked(Prefs.getBool(this, Prefs.KEY_EDIT, false));
@@ -259,6 +269,8 @@ public class MainActivity extends Activity {
             }
         });
         lay.addView(editSw);
+        note(lay, "打开编辑后：拖动面板 / 摄像头窗口可移动；拖摄像头右下角方块可缩放。\n"
+                + "关掉后窗口恢复「穿透」，不再挡触摸。位置和大小会自动保存。");
         lay.addView(ghost("恢复默认位置和大小", new View.OnClickListener() {
             @Override public void onClick(View v) {
                 Prefs.resetLayout(MainActivity.this);
@@ -270,6 +282,19 @@ public class MainActivity extends Activity {
     // ================================================================ 摄像头页
 
     private void buildCameraPage(LinearLayout page) {
+        LinearLayout sw = card(page, "开关");
+        Switch camSw = new Switch(this);
+        styleSwitch(camSw, "启用侧摄像头（打转向灯时显示）");
+        camSw.setChecked(Prefs.getBool(this, Prefs.KEY_SHOW_CAMERA, true));
+        camSw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override public void onCheckedChanged(CompoundButton b, boolean checked) {
+                Prefs.putBool(MainActivity.this, Prefs.KEY_SHOW_CAMERA, checked);
+                restartService();
+            }
+        });
+        sw.addView(camSw);
+        note(sw, "关掉后打转向灯不会弹摄像头窗口（也不会去连 RTSP，省资源）。");
+
         LinearLayout cam = card(page, "侧摄像头预连");
         note(cam, "预连 = 开机就把该侧 RTSP 拉起来常驻，打灯只把窗口移进来 → 基本零延迟。\n"
                 + "注意：服务端只有一路发送口，预连哪侧会把另一侧挤掉（切过去会慢一点）。");
