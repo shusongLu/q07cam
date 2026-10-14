@@ -141,9 +141,16 @@ public class OverlayService extends Service {
     @Override
     public IBinder onBind(Intent intent) { return null; }
 
+    /** START_STICKY：被系统回收后尽量自动重建。 */
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        return START_STICKY;
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
+        serviceStartAt = System.currentTimeMillis();
         startForegroundInternal();
 
         wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
@@ -218,6 +225,14 @@ public class OverlayService extends Service {
             @Override public void run() {
                 updateCamera();
                 handler.postDelayed(this, 100L);
+            }
+        });
+
+        // 看门狗：每秒体检一次（SOA 自愈 / 摄像头重连）
+        handler.post(new Runnable() {
+            @Override public void run() {
+                healthCheck();
+                handler.postDelayed(this, 1000L);
             }
         });
 
@@ -405,23 +420,32 @@ public class OverlayService extends Service {
         if (soa == null) return;
         try {
             int[] a;
-            if ((a = soa.read(ID_GEAR_POSN)) != null && a.length >= 2) { gear = a[0]; gearInvalid = a[1]; }
-            if ((a = soa.read(ID_VEH_SPD)) != null && a.length >= 1) speed = a[0] * SPEED_SCALE;
-            if ((a = soa.read(ID_POWER_SHIFT)) != null && a.length >= 1) powerShift = a[0];
-            if ((a = soa.read(ID_RESI_MILG)) != null && a.length >= 1) rangeKm = a[0];
-            if ((a = soa.read(ID_TOTAL_MILG)) != null && a.length >= 1) totalKm = a[0];
-            if ((a = soa.read(ID_BCU_OPER_PRM)) != null && a.length > 12) hvVolt = a[12];
-            if ((a = soa.read(ID_PT_LAMP)) != null && a.length > 25) socPct = a[25];
+            boolean any = false;
+            if ((a = soa.read(ID_GEAR_POSN)) != null && a.length >= 2) { gear = a[0]; gearInvalid = a[1]; any = true; }
+            if ((a = soa.read(ID_VEH_SPD)) != null && a.length >= 1) { speed = a[0] * SPEED_SCALE; any = true; }
+            if ((a = soa.read(ID_POWER_SHIFT)) != null && a.length >= 1) { powerShift = a[0]; any = true; }
+            if ((a = soa.read(ID_RESI_MILG)) != null && a.length >= 1) { rangeKm = a[0]; any = true; }
+            if ((a = soa.read(ID_TOTAL_MILG)) != null && a.length >= 1) { totalKm = a[0]; any = true; }
+            if ((a = soa.read(ID_BCU_OPER_PRM)) != null && a.length > 12) { hvVolt = a[12]; any = true; }
+            if ((a = soa.read(ID_PT_LAMP)) != null && a.length > 25) { socPct = a[25]; any = true; }
             if ((a = soa.read(ID_PDU_OPER_PRM)) != null && a.length > 13) {
                 pduVolt = a[8] / 10f;
                 pduCur = a[0] * PDU_CURRENT_SCALE;
                 kwPdu = pduVolt * pduCur / 1000f;
+                any = true;
             }
             if ((a = soa.read(ID_REEV_OPER)) != null) {
                 for (int i = 0; i < reev.length && i < a.length; i++) reev[i] = a[i];
+                any = true;
             }
-            liveOk = true;
-            publishLive();
+            // 必须"真的读到东西"才算健康 —— 否则读不到时也会刷新时间戳，看门狗就失效了
+            if (any) {
+                liveOk = true;
+                lastPollOkAt = System.currentTimeMillis();
+                publishLive();
+            } else {
+                liveOk = false;
+            }
         } catch (Throwable ignored) {
         }
     }
@@ -556,6 +580,73 @@ public class OverlayService extends Service {
             case 3: return "双闪";
             default: return "关";
         }
+    }
+
+    // ---------------------------------------------------------------- 自愈看门狗
+
+    private volatile long lastPollOkAt = 0;
+    private volatile long lastSoaRetryAt = 0;
+    private volatile long lastCamRetryAt = 0;
+    private volatile long serviceStartAt = 0;
+
+    /**
+     * 车机会休眠/被系统回收，这之后：
+     *  - SOA 连接可能已经死了 -> 数据卡住不动
+     *  - RTSP 会话可能被断开  -> 画面黑掉但窗口还在
+     * 这里定时体检并自愈。
+     */
+    private void healthCheck() {
+        long now = System.currentTimeMillis();
+
+        // 1) SOA：超过 12 秒没有新数据就重建连接
+        boolean soaStale = (soa == null)
+                || (lastPollOkAt == 0
+                        ? (now - serviceStartAt > 15000)
+                        : (now - lastPollOkAt > 12000));
+        if (soaStale && now - lastSoaRetryAt > 15000) {
+            lastSoaRetryAt = now;
+            Log.w(TAG, "[wd] SOA 无数据，重建连接（上次成功 " + (lastPollOkAt == 0 ? "从未" : (now - lastPollOkAt) + "ms 前") + "）");
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        SoaClient c = new SoaClient();
+                        if (c.init(OverlayService.this)) {
+                            soa = c;
+                            lastPollOkAt = System.currentTimeMillis();
+                            liveOk = true;
+                            Log.i(TAG, "[wd] SOA 重建成功");
+                        } else {
+                            Log.w(TAG, "[wd] SOA 重建失败，稍后再试");
+                        }
+                    } catch (Throwable t) {
+                        Log.e(TAG, "[wd] SOA 重建异常: " + t);
+                    }
+                }
+            }, "q07-soa-retry").start();
+        }
+
+        // 2) 摄像头：正在显示的那一侧 5 秒收不到包就重连
+        if (showCamera) {
+            int want = wantedSide();
+            if (want >= 0) {
+                CamSide s = sides[want];
+                if (s.player != null && s.onScreen) {
+                    long idle = now - s.player.lastRecv();
+                    if (s.player.lastRecv() > 0 && idle > 5000 && now - lastCamRetryAt > 8000) {
+                        lastCamRetryAt = now;
+                        Log.w(TAG, "[wd] 摄像头 " + (want == SIDE_LEFT ? "左" : "右")
+                                + " 已 " + idle + "ms 无数据，重连");
+                        stopPlayer(want);
+                        startSide(want);
+                    }
+                }
+            }
+        }
+    }
+
+    private int wantedSide() {
+        int turn = showCamera ? turnState() : 0;
+        return (turn == 1) ? SIDE_LEFT : (turn == 2) ? SIDE_RIGHT : -1;
     }
 
     // ---------------------------------------------------------------- 摄像头

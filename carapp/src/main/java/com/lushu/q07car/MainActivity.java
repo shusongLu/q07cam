@@ -542,6 +542,22 @@ public class MainActivity extends Activity {
         boot.addView(bootSw);
         note(boot, "Android 8+ 在开机广播里必须用 startForegroundService，用 startService 会被静默拒绝 —— 已修。");
 
+        // 保活
+        LinearLayout keep = card(page, "保活");
+        note(keep, "车机会休眠、也会回收后台进程。开启电池优化白名单能显著降低被杀的几率；\n"
+                + "服务本身是 START_STICKY，被杀后系统会尽量重建。");
+        final TextView keepState = new TextView(this);
+        keepState.setTextSize(13f);
+        keepState.setTextColor(cSub);
+        keepState.setPadding(0, dp(6), 0, 0);
+        keep.addView(keepState);
+        keep.addView(ghost("加入电池优化白名单", new View.OnClickListener() {
+            @Override public void onClick(View v) { requestIgnoreBattery(); }
+        }));
+        keepState.post(new Runnable() {
+            @Override public void run() { updateKeepState(keepState); }
+        });
+
         // 关于
         LinearLayout about = card(page, "关于");
         String ver = "?";
@@ -599,8 +615,32 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void toast(final String s) {
-        ui.post(new Runnable() {
+    private void updateKeepState(TextView tv) {
+        try {
+            android.os.PowerManager pm =
+                    (android.os.PowerManager) getSystemService(POWER_SERVICE);
+            boolean ok = pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
+            tv.setText("当前状态：" + (ok ? "● 已在白名单（不易被杀）" : "○ 未加入（可能被系统回收）"));
+        } catch (Throwable t) {
+            tv.setText("当前状态：读取失败 " + t.getClass().getSimpleName());
+        }
+    }
+
+    private void requestIgnoreBattery() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        Uri.parse("package:" + getPackageName())));
+            } else {
+                toast("系统版本不需要");
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "请求电池白名单失败: " + t);
+            toast("打开失败，请手动在 系统设置→电池 里设置");
+        }
+    }
+
+    private void toast(final String s) {        ui.post(new Runnable() {
             @Override public void run() {
                 android.widget.Toast.makeText(MainActivity.this, s,
                         android.widget.Toast.LENGTH_LONG).show();
