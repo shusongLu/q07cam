@@ -31,8 +31,8 @@ android {
         applicationId = "de.dsa.ford.otaflash"
         minSdk = 30
         targetSdk = 30
-        versionCode = 10
-        versionName = "1.0"
+        versionCode = 13
+        versionName = "1.2"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -89,15 +89,15 @@ val copyVendorDex = tasks.register<Copy>("copyVendorDex") {
 
 // 2) 厂商 FFmpeg 播放器（侧摄像头 H.265 RTSP），从 CaEvsAppService.apk 里抽
 val extractFfmpeg = tasks.register("extractFfmpeg") {
-    val apk = rootProject.file("recon/apks-manual/com.changan.evs.appservice/base.apk")
+    val apkFile = rootProject.file("recon/apks-manual/com.changan.evs.appservice/base.apk")
     val outDir = layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a").asFile
-    inputs.file(apk)
+    inputs.file(apkFile)
     outputs.dir(outDir)
     doLast {
         val so = File(outDir, "libffmpeg.so")
         if (so.exists() && so.length() > 0) return@doLast
         outDir.mkdirs()
-        ZipFile(apk).use { z ->
+        ZipFile(apkFile).use { z ->
             val e = z.getEntry("lib/arm64-v8a/libffmpeg.so")
                 ?: error("APK 里没有 lib/arm64-v8a/libffmpeg.so")
             z.getInputStream(e).use { i -> so.outputStream().use { o -> i.copyTo(o) } }

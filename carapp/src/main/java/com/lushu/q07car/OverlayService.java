@@ -64,6 +64,8 @@ public class OverlayService extends Service {
     private static final int CAM_W = 720, CAM_H = 405, CAM_X = 470, CAM_Y = 745;
     private static final String RTSP_LEFT = "rtsp://172.16.6.26:8888/lt";
     private static final String RTSP_RIGHT = "rtsp://172.16.6.26:8888/rt";
+    /** 换边时的间隔：等旧 RTSP 会话释放（厂商 AVM 也是这么做的）。 */
+    private static final long SWITCH_DELAY_MS = 450L;
 
     public static volatile boolean running = false;
 
@@ -76,7 +78,16 @@ public class OverlayService extends Service {
     private volatile float kwPdu, pduVolt, pduCur, hvVolt, socPct, rangeKm, totalKm, speed;
     private volatile int gear = -1, gearInvalid = -1, powerShift = -1;
     private volatile int[] reev = new int[7];
-    private volatile long lastLeftTurnAt = 0, lastRightTurnAt = 0, lastLogAt = 0;
+    private volatile long lastLogAt = 0;
+
+    /**
+     * 当前转向状态：0 关 / 1 左 / 2 右 / 3 双闪。
+     * 只有在"同一次读数里左右同时亮"才判定双闪（并要求连续两次，防抖动），
+     * 否则以最近一次单独亮起的那一侧为准 —— 这样右->左快速切换能立刻生效。
+     */
+    private volatile int curTurn = 0;
+    private volatile long curTurnAt = 0;
+    private volatile int bothStreak = 0;
 
     // 摄像头
     private SurfaceView camView;
@@ -198,22 +209,29 @@ public class OverlayService extends Service {
             }
             if ((a = soa.read(ID_TURN_LI)) != null && a.length >= 2) {
                 long now = System.currentTimeMillis();
-                if (a[0] != 0) lastLeftTurnAt = now;
-                if (a[1] != 0) lastRightTurnAt = now;
+                boolean l = a[0] != 0;
+                boolean r = a[1] != 0;
+                if (l && r) {
+                    // 左右同时亮：连读两次才认双闪（切换瞬间可能扫到一次）
+                    if (++bothStreak >= 2) { curTurn = 3; curTurnAt = now; }
+                } else if (l) {
+                    bothStreak = 0;
+                    curTurn = 1;
+                    curTurnAt = now;
+                } else if (r) {
+                    bothStreak = 0;
+                    curTurn = 2;
+                    curTurnAt = now;
+                }
+                // 左右都不亮：不动 curTurn，靠保持窗口维持（转向灯是闪烁的）
             }
         } catch (Throwable ignored) {
         }
     }
 
-    /** 0 关 1 左 2 右 3 双闪 */
+    /** 0 关 1 左 2 右 3 双闪（保持窗口消除闪烁） */
     private int turnState() {
-        long now = System.currentTimeMillis();
-        boolean left = now - lastLeftTurnAt < TURN_HOLD_MS;
-        boolean right = now - lastRightTurnAt < TURN_HOLD_MS;
-        if (left && right) return 3;
-        if (left) return 1;
-        if (right) return 2;
-        return 0;
+        return (System.currentTimeMillis() - curTurnAt < TURN_HOLD_MS) ? curTurn : 0;
     }
 
     // ---------------------------------------------------------------- 渲染
@@ -287,15 +305,38 @@ public class OverlayService extends Service {
     private void updateCamera() {
         if (wm == null) return;
         int turn = turnState();
-        String want = (turn == 1) ? RTSP_LEFT : (turn == 2 || turn == 3) ? RTSP_RIGHT : null;
+        // 双闪（3）不弹侧摄像头 —— 两边都不是"转向意图"
+        String want = (turn == 1) ? RTSP_LEFT : (turn == 2) ? RTSP_RIGHT : null;
+
         if (want == null) {
-            if (camUrl != null || camView != null) hideCam();
+            if (camView != null) hideCam();
             return;
         }
-        if (want.equals(camUrl) && camView != null) return;
-        hideCam();
-        showCam(want);
+        if (camView == null) {
+            showCam(want);
+        } else if (!want.equals(camUrl)) {
+            switchStream(want);
+        }
     }
+
+    /**
+     * 换边：厂商自己的 AVM 在左右切换时也是"先关、等一个间隔、再开"
+     * （ViewAssistConstant.SWITCH_COMMON_INTERVAL），否则 RTSP 会话还没释放，
+     * 新流接不上就是黑屏。这里照做，并且复用同一个 SurfaceView，不重建窗口。
+     */
+    private void switchStream(String url) {
+        camUrl = url;
+        handler.removeCallbacks(startTask);
+        stopPlayback();
+        Log.i(TAG, "[cam] switch -> " + url);
+        handler.postDelayed(startTask, SWITCH_DELAY_MS);
+    }
+
+    private final Runnable startTask = new Runnable() {
+        @Override public void run() {
+            if (camSurface != null && camUrl != null) startPlayback(camUrl);
+        }
+    };
 
     private void showCam(String url) {
         try {
@@ -303,10 +344,13 @@ public class OverlayService extends Service {
             sv.getHolder().addCallback(new SurfaceHolder.Callback() {
                 @Override public void surfaceCreated(SurfaceHolder h) {
                     camSurface = h.getSurface();
-                    startPlayback();
+                    handler.removeCallbacks(startTask);
+                    // 让 surface 真正就绪后再喂流
+                    handler.postDelayed(startTask, 300L);
                 }
                 @Override public void surfaceChanged(SurfaceHolder h, int f, int w, int hh) { }
                 @Override public void surfaceDestroyed(SurfaceHolder h) {
+                    handler.removeCallbacks(startTask);
                     stopPlayback();
                     camSurface = null;
                 }
@@ -330,6 +374,7 @@ public class OverlayService extends Service {
     }
 
     private void hideCam() {
+        handler.removeCallbacks(startTask);
         stopPlayback();
         if (camView != null && wm != null) {
             try { wm.removeView(camView); } catch (Throwable ignored) {}
@@ -340,15 +385,15 @@ public class OverlayService extends Service {
         camUrl = null;
     }
 
-    private void startPlayback() {
-        if (camPlayer != null || camSurface == null || camUrl == null) return;
+    private void startPlayback(String url) {
+        if (camPlayer != null || camSurface == null || url == null) return;
         try {
             CaMediaPlayer p = new CaMediaPlayer();
-            int r1 = p.setDataSource(camUrl);
+            int r1 = p.setDataSource(url);
             int r2 = p.setSurface(camSurface);
             int r3 = p.play(camSurface);
             camPlayer = p;
-            Log.i(TAG, "[cam] " + camUrl + " setDataSource=" + r1 + " setSurface=" + r2 + " play=" + r3);
+            Log.i(TAG, "[cam] " + url + " setDataSource=" + r1 + " setSurface=" + r2 + " play=" + r3);
         } catch (Throwable t) {
             Log.e(TAG, "[cam] startPlayback 失败: " + t);
             camPlayer = null;

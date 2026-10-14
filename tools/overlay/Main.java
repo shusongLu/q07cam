@@ -80,7 +80,12 @@ public class Main {
     private static volatile int[] egyCnse = new int[5];
     private static volatile int gear = -1, gearInvalid = -1, powerShift = -1, pduRaw0 = -1, pduRaw22 = -1, pduRaw8 = -1;
 
-    private static volatile long lastLeftTurnAt = 0L, lastRightTurnAt = 0L, lastLogAt = 0L;
+    private static volatile long lastLogAt = 0L;
+
+    /** 当前转向：0 关 / 1 左 / 2 右 / 3 双闪。只有同一次读数里左右同时亮才判双闪。 */
+    private static volatile int curTurn = 0;
+    private static volatile long curTurnAt = 0L;
+    private static volatile int bothStreak = 0;
 
     // ---------------------------------------------------------------- 摄像头状态
     private static WindowManager wmRef;
@@ -88,8 +93,9 @@ public class Main {
     private static SurfaceView camView;
     private static CaMediaPlayer camPlayer;
     private static Surface camSurface;
-    private static String camUrl;
-    private static long lastCamLogAt = 0L;
+    private static volatile String camUrl;
+    private static volatile long lastCamLogAt = 0L;
+    private static Handler uiHandler;
 
     public static void main(String[] args) {
         try {
@@ -121,6 +127,7 @@ public class Main {
             wm.addView(tvMain, lp);
             wmRef = wm;
             ctxRef = ctx;
+            uiHandler = new Handler(Looper.getMainLooper());
             System.out.println("[ovl] window added");
 
             if (!initSoa()) {
@@ -308,7 +315,7 @@ public class Main {
      */
     private static void updateCamera() {
         int turn = turnState();
-        String want = (turn == 1) ? RTSP_LEFT : (turn == 2 || turn == 3) ? RTSP_RIGHT : null;
+        String want = (turn == 1) ? RTSP_LEFT : (turn == 2) ? RTSP_RIGHT : null;
 
         if (want == null) {
             if (camUrl != null || camView != null) hideCam();
@@ -316,7 +323,15 @@ public class Main {
         }
         if (want.equals(camUrl) && camView != null) return;
         hideCam();
-        showCam(want);
+        // 换边要等旧 RTSP 会话释放（厂商 AVM 也是"先关、等一个间隔、再开"）
+        final String u = want;
+        uiHandler.postDelayed(new Runnable() {
+            @Override public void run() {
+                int t = turnState();
+                String now = (t == 1) ? RTSP_LEFT : (t == 2) ? RTSP_RIGHT : null;
+                if (u.equals(now)) showCam(u);
+            }
+        }, 450L);
     }
 
     private static void showCam(String url) {
@@ -325,7 +340,10 @@ public class Main {
             sv.getHolder().addCallback(new SurfaceHolder.Callback() {
                 @Override public void surfaceCreated(SurfaceHolder h) {
                     camSurface = h.getSurface();
-                    startPlayback();
+                    // 等 surface 真正就绪再喂流
+                    uiHandler.postDelayed(new Runnable() {
+                        @Override public void run() { startPlayback(); }
+                    }, 300L);
                 }
                 @Override public void surfaceChanged(SurfaceHolder h, int f, int w, int hh) {
                 }
@@ -404,9 +422,16 @@ public class Main {
                 if (valAt < 0) continue;
                 String[] parts = line.substring(valAt + 6).trim().split("\\s+");
                 if (parts.length < 2) continue;
+                boolean l = "1".equals(parts[0]);
+                boolean r = "1".equals(parts[1]);
                 long now = System.currentTimeMillis();
-                if ("1".equals(parts[0])) lastLeftTurnAt = now;
-                if ("1".equals(parts[1])) lastRightTurnAt = now;
+                if (l && r) {
+                    if (++bothStreak >= 2) { curTurn = 3; curTurnAt = now; }
+                } else if (l) {
+                    bothStreak = 0; curTurn = 1; curTurnAt = now;
+                } else if (r) {
+                    bothStreak = 0; curTurn = 2; curTurnAt = now;
+                }
             }
         } catch (Throwable t) {
             System.out.println("[ovl] logcat watcher failed: " + t);
@@ -417,13 +442,7 @@ public class Main {
     }
 
     private static int turnState() {
-        long now = System.currentTimeMillis();
-        boolean left = now - lastLeftTurnAt < TURN_HOLD_MS;
-        boolean right = now - lastRightTurnAt < TURN_HOLD_MS;
-        if (left && right) return 3;
-        if (left) return 1;
-        if (right) return 2;
-        return 0;
+        return (System.currentTimeMillis() - curTurnAt < TURN_HOLD_MS) ? curTurn : 0;
     }
 
     private static String turnName(int t) {
