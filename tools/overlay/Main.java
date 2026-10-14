@@ -48,8 +48,9 @@ public class Main {
     private static final int ID_REEV_OPER    = 0x00413072; // 增程器运行参数
     private static final int ID_EGY_CNSE     = 0x00412050; // 整车能耗信息
 
-    /** PDU[0] 的量纲待标定：暂按 0.1 A，功率 = 母线电压 × 该电流。 */
-    private static final float PDU_CURRENT_SCALE = 0.1f;
+    /** PDU[0] 的量纲（电流系数）：默认 0.01 A，可用 /data/local/tmp/q07scale.txt 覆盖，免重编。 */
+    private static final float PDU_CURRENT_SCALE_DEFAULT = 0.01f;
+    private static volatile float PDU_CURRENT_SCALE = PDU_CURRENT_SCALE_DEFAULT;
 
     /** 转向灯"保持"窗口：闪烁间隔约 720ms，2.5s 内没再收到就认为已关。 */
     private static final long TURN_HOLD_MS = 2500L;
@@ -96,6 +97,7 @@ public class Main {
             if (!initSoa()) {
                 tvMain.setText("SOA 未连接（检查 CLASSPATH 是否含 sdk*.dex / soa*.dex）");
             }
+            loadScale();
 
             final Handler main = new Handler(Looper.getMainLooper());
             main.postDelayed(new Runnable() {
@@ -120,6 +122,21 @@ public class Main {
     }
 
     // ---------------------------------------------------------------- SOA
+
+    /** 允许通过 /data/local/tmp/q07scale.txt（一行浮点数）改电流系数，免重编。 */
+    private static void loadScale() {
+        try {
+            BufferedReader r = new BufferedReader(new java.io.FileReader("/data/local/tmp/q07scale.txt"));
+            String l = r.readLine();
+            r.close();
+            if (l != null && l.trim().length() > 0) {
+                PDU_CURRENT_SCALE = Float.parseFloat(l.trim());
+                System.out.println("[ovl] scale from file = " + PDU_CURRENT_SCALE);
+            }
+        } catch (Throwable ignored) {
+            System.out.println("[ovl] scale = default " + PDU_CURRENT_SCALE);
+        }
+    }
 
     private static Object soaClient;
     private static Method mGetProperty, mGetValue;
