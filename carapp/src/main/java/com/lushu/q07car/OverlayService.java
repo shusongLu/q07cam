@@ -91,11 +91,31 @@ public class OverlayService extends Service {
     /** 收到转向信号的时间，用来量"信号 -> 出画面"的延迟。 */
     private volatile long turnSignalAt = 0;
 
-    // 摄像头
-    private SurfaceView camView;
-    private CaMediaPlayer camPlayer;
-    private Surface camSurface;
-    private String camUrl;
+    // ---------------- 摄像头（每侧一个窗口） ----------------
+    // 预连：开机就把某侧（或双侧）的 RTSP 拉起来常驻，窗口放在屏幕外，
+    // 打灯时只把窗口"移进来"，省掉 RTSP 握手 → 基本零延迟。
+    // 代价：一直占解码器/带宽；若 RTSP 服务只允许单会话，会挡住另一侧。
+    public static final String PRE_NONE = "none";
+    public static final String PRE_LEFT = "left";
+    public static final String PRE_RIGHT = "right";
+    public static final String PRE_BOTH = "both";
+
+    private static final int SIDE_LEFT = 0;
+    private static final int SIDE_RIGHT = 1;
+    private static final int OFFSCREEN_X = -3000;
+
+    private static class CamSide {
+        SurfaceView view;
+        CaMediaPlayer player;
+        Surface surface;
+        String url;
+        boolean onScreen;
+    }
+
+    private final CamSide[] sides = new CamSide[]{new CamSide(), new CamSide()};
+
+    /** 预连掩码：bit0=左, bit1=右。 */
+    private volatile int preMask = 0;
 
     @Override
     public IBinder onBind(Intent intent) { return null; }
@@ -140,6 +160,10 @@ public class OverlayService extends Service {
             }
         }, "q07-soa").start();
 
+        // 预连配置（可在 App 界面里切）
+        loadPrefs();
+        setupPreconnect();
+
         // 转向灯单独用高频线程读（只读 1 个属性，~20ms），把发现延迟从 300ms 压到 ~60ms
         new Thread(new Runnable() {
             @Override public void run() {
@@ -175,11 +199,26 @@ public class OverlayService extends Service {
     @Override
     public void onDestroy() {
         running = false;
-        hideCam();
+        for (int i = 0; i < 2; i++) {
+            stopPlayer(i);
+            CamSide s = sides[i];
+            if (s.view != null && wm != null) {
+                try { wm.removeView(s.view); } catch (Throwable ignored) {}
+                s.view = null;
+            }
+        }
         try { if (tvMain != null) wm.removeView(tvMain); } catch (Throwable ignored) {}
         if (handler != null) handler.removeCallbacksAndMessages(null);
         Log.i(TAG, "service stopped");
         super.onDestroy();
+    }
+
+    private void loadPrefs() {
+        String p = getSharedPreferences("q07", MODE_PRIVATE).getString("preconnect", PRE_NONE);
+        preMask = 0;
+        if (PRE_LEFT.equals(p) || PRE_BOTH.equals(p)) preMask |= 1;
+        if (PRE_RIGHT.equals(p) || PRE_BOTH.equals(p)) preMask |= 2;
+        Log.i(TAG, "[cam] 预连设置 = " + p + "（mask=" + preMask + "）");
     }
 
     private void startForegroundInternal() {
@@ -337,111 +376,159 @@ public class OverlayService extends Service {
 
     // ---------------------------------------------------------------- 摄像头
 
+    private static String urlOf(int side) {
+        return side == SIDE_LEFT ? RTSP_LEFT : RTSP_RIGHT;
+    }
+
     private void updateCamera() {
         if (wm == null) return;
         int turn = turnState();
-        // 双闪（3）不弹侧摄像头 —— 两边都不是"转向意图"
-        String want = (turn == 1) ? RTSP_LEFT : (turn == 2) ? RTSP_RIGHT : null;
+        int want = (turn == 1) ? SIDE_LEFT : (turn == 2) ? SIDE_RIGHT : -1;
 
-        if (want == null) {
-            if (camView != null) hideCam();
+        if (want < 0) {
+            for (int i = 0; i < 2; i++) {
+                if ((preMask & (1 << i)) != 0) moveSide(i, false);
+                else stopSide(i);
+            }
             return;
         }
-        if (camView == null) {
-            showCam(want);
-        } else if (!want.equals(camUrl)) {
-            switchStream(want);
-        }
-    }
 
-    /**
-     * 换边：厂商自己的 AVM 在左右切换时也是"先关、等一个间隔、再开"
-     * （ViewAssistConstant.SWITCH_COMMON_INTERVAL），否则 RTSP 会话还没释放，
-     * 新流接不上就是黑屏。这里照做，并且复用同一个 SurfaceView，不重建窗口。
-     */
-    private void switchStream(String url) {
-        camUrl = url;
-        handler.removeCallbacks(startTask);
-        stopPlayback();
-        Log.i(TAG, "[cam] switch -> " + url);
-        handler.postDelayed(startTask, SWITCH_DELAY_MS);
+        int other = 1 - want;
+
+        // 非预连的一侧：立刻收掉，别占着 RTSP 会话
+        if ((preMask & (1 << other)) == 0) stopSide(other);
+        else moveSide(other, false);
+
+        if ((preMask & (1 << want)) != 0) {
+            // 预连侧：窗口常驻（离屏），直接移进来即可 —— 零延迟
+            ensureSide(want, true);
+            if (sides[want].player == null) startSide(want);
+            moveSide(want, true);
+        } else {
+            CamSide s = sides[want];
+            if (s.view != null && s.player != null && urlOf(want).equals(s.url)) {
+                moveSide(want, true);
+            } else {
+                // 没预连：走"关 -> 等会话释放 -> 开"
+                stopSide(want);
+                sides[want].url = urlOf(want);
+                final int idx = want;
+                handler.removeCallbacks(startTask);
+                handler.postDelayed(startTask, SWITCH_DELAY_MS);
+                Log.i(TAG, "[cam] switch -> " + urlOf(want));
+            }
+        }
     }
 
     private final Runnable startTask = new Runnable() {
         @Override public void run() {
-            if (camSurface != null && camUrl != null) startPlayback(camUrl);
+            int turn = turnState();
+            int want = (turn == 1) ? SIDE_LEFT : (turn == 2) ? SIDE_RIGHT : -1;
+            if (want < 0) return;
+            ensureSide(want, (preMask & (1 << want)) != 0);
+            startSide(want);
+            moveSide(want, true);
         }
     };
 
-    private void showCam(String url) {
+    /** 建窗口（预连的放屏幕外，非预连的直接放可见位置）。 */
+    private void ensureSide(final int idx, boolean pre) {
+        CamSide s = sides[idx];
+        if (s.view != null) return;
         try {
             SurfaceView sv = new SurfaceView(this);
             sv.getHolder().addCallback(new SurfaceHolder.Callback() {
                 @Override public void surfaceCreated(SurfaceHolder h) {
-                    camSurface = h.getSurface();
-                    // surface 已就绪，立即喂流（首次打开不需要额外等待）
-                    handler.removeCallbacks(startTask);
-                    startTask.run();
+                    sides[idx].surface = h.getSurface();
+                    startSide(idx);
                 }
                 @Override public void surfaceChanged(SurfaceHolder h, int f, int w, int hh) { }
                 @Override public void surfaceDestroyed(SurfaceHolder h) {
-                    handler.removeCallbacks(startTask);
-                    stopPlayback();
-                    camSurface = null;
+                    stopPlayer(idx);
+                    sides[idx].surface = null;
                 }
             });
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                     CAM_W, CAM_H,
                     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                     PixelFormat.OPAQUE);
             lp.gravity = Gravity.TOP | Gravity.START;
-            lp.x = CAM_X;
+            lp.x = pre ? OFFSCREEN_X : CAM_X;
             lp.y = CAM_Y;
             wm.addView(sv, lp);
-            camView = sv;
-            camUrl = url;
-            Log.i(TAG, "[cam] show " + url);
+            s.view = sv;
+            s.url = urlOf(idx);
+            s.onScreen = !pre;
+            Log.i(TAG, "[cam] 建窗口 " + (idx == SIDE_LEFT ? "左" : "右") + (pre ? "（预连，离屏）" : ""));
         } catch (Throwable t) {
-            Log.e(TAG, "[cam] showCam 失败: " + t);
+            Log.e(TAG, "[cam] ensureSide 失败: " + t);
         }
     }
 
-    private void hideCam() {
-        handler.removeCallbacks(startTask);
-        stopPlayback();
-        if (camView != null && wm != null) {
-            try { wm.removeView(camView); } catch (Throwable ignored) {}
-        }
-        camView = null;
-        camSurface = null;
-        if (camUrl != null) Log.i(TAG, "[cam] hide");
-        camUrl = null;
-    }
-
-    private void startPlayback(String url) {
-        if (camPlayer != null || camSurface == null || url == null) return;
+    private void moveSide(int idx, boolean onScreen) {
+        CamSide s = sides[idx];
+        if (s.view == null || wm == null || s.onScreen == onScreen) return;
         try {
+            WindowManager.LayoutParams lp = (WindowManager.LayoutParams) s.view.getLayoutParams();
+            lp.x = onScreen ? CAM_X : OFFSCREEN_X;
+            wm.updateViewLayout(s.view, lp);
+            s.onScreen = onScreen;
+            Log.i(TAG, "[cam] " + (onScreen ? "显示 " : "收起 ") + (idx == SIDE_LEFT ? "左" : "右"));
+        } catch (Throwable t) {
+            Log.e(TAG, "[cam] moveSide 失败: " + t);
+        }
+    }
+
+    private void startSide(int idx) {
+        CamSide s = sides[idx];
+        if (s.player != null || s.surface == null || s.url == null) return;
+        try {
+            if (s.view == null) ensureSide(idx, (preMask & (1 << idx)) != 0);
             CaMediaPlayer p = new CaMediaPlayer();
-            int r1 = p.setDataSource(url);
-            int r2 = p.setSurface(camSurface);
-            int r3 = p.play(camSurface);
-            camPlayer = p;
+            int r1 = p.setDataSource(s.url);
+            int r2 = p.setSurface(s.surface);
+            int r3 = p.play(s.surface);
+            s.player = p;
             long ms = System.currentTimeMillis() - turnSignalAt;
-            Log.i(TAG, "[cam] " + url + " setDataSource=" + r1 + " setSurface=" + r2 + " play=" + r3
+            Log.i(TAG, "[cam] " + s.url + " setDataSource=" + r1 + " setSurface=" + r2 + " play=" + r3
                     + "   信号->开始播放 " + ms + "ms");
         } catch (Throwable t) {
-            Log.e(TAG, "[cam] startPlayback 失败: " + t);
-            camPlayer = null;
+            Log.e(TAG, "[cam] startSide 失败: " + t);
+            s.player = null;
         }
     }
 
-    private void stopPlayback() {
-        if (camPlayer != null) {
-            try { camPlayer.close(); } catch (Throwable ignored) {}
-            try { camPlayer.release(); } catch (Throwable ignored) {}
-            camPlayer = null;
+    private void stopPlayer(int idx) {
+        CamSide s = sides[idx];
+        if (s.player != null) {
+            try { s.player.close(); } catch (Throwable ignored) {}
+            try { s.player.release(); } catch (Throwable ignored) {}
+            s.player = null;
+        }
+    }
+
+    /** 非预连侧：连窗口一起收掉（释放 RTSP 会话）。 */
+    private void stopSide(int idx) {
+        CamSide s = sides[idx];
+        if (s.view == null) { stopPlayer(idx); return; }
+        if ((preMask & (1 << idx)) != 0) { moveSide(idx, false); return; }
+        stopPlayer(idx);
+        try { wm.removeView(s.view); } catch (Throwable ignored) {}
+        s.view = null;
+        s.surface = null;
+        s.onScreen = false;
+        Log.i(TAG, "[cam] 收起 " + (idx == SIDE_LEFT ? "左" : "右"));
+    }
+
+    /** 预连侧：开机就把流拉起来（窗口在屏外）。 */
+    private void setupPreconnect() {
+        if ((preMask & 1) != 0) { ensureSide(SIDE_LEFT, true); }
+        if ((preMask & 2) != 0) { ensureSide(SIDE_RIGHT, true); }
+        if (preMask != 0) {
+            Log.i(TAG, "[cam] 预连掩码 = " + preMask + "（sides 建好后会自动拉流）");
         }
     }
 }

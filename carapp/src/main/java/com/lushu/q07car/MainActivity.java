@@ -13,6 +13,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -75,6 +76,51 @@ public class MainActivity extends Activity {
                 } catch (Throwable t) {
                     Log.e(TAG, "打开悬浮窗设置页失败: " + t);
                 }
+            }
+        }));
+
+        // ---- 侧摄像头预连设置 ----
+        TextView camTitle = new TextView(this);
+        camTitle.setText("\n侧摄像头预连（影响打灯出画面的速度）");
+        camTitle.setPadding(0, dp(16), 0, dp(4));
+        root.addView(camTitle);
+
+        TextView camHint = new TextView(this);
+        camHint.setTextSize(12f);
+        camHint.setText("预连 = 开机就把 RTSP 拉起来常驻，窗口放在屏幕外，打灯只把窗口移进来 → 基本零延迟。\n"
+                + "代价：一直占解码器和带宽；若 RTSP 服务只允许单会话，预连哪侧就会挡住另一侧。");
+        root.addView(camHint);
+
+        final String[] keys = {OverlayService.PRE_NONE, OverlayService.PRE_LEFT,
+                OverlayService.PRE_RIGHT, OverlayService.PRE_BOTH};
+        final String[] labels = {"不预连（默认）", "预连左侧（打左灯秒出）", "预连右侧", "双路预连（都秒出）"};
+        String cur = getSharedPreferences("q07", MODE_PRIVATE).getString("preconnect", OverlayService.PRE_NONE);
+
+        final RadioGroup group = new RadioGroup(this);
+        group.setOrientation(RadioGroup.VERTICAL);
+        for (int i = 0; i < keys.length; i++) {
+            android.widget.RadioButton rb = new android.widget.RadioButton(this);
+            rb.setText(labels[i]);
+            rb.setId(i);
+            rb.setTag(keys[i]);
+            if (keys[i].equals(cur)) rb.setChecked(true);
+            group.addView(rb);
+        }
+        root.addView(group);
+
+        root.addView(button("应用并重启悬浮窗", new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                int id = group.getCheckedRadioButtonId();
+                String key = (id >= 0 && id < keys.length) ? keys[id] : OverlayService.PRE_NONE;
+                getSharedPreferences("q07", MODE_PRIVATE).edit()
+                        .putString("preconnect", key).apply();
+                stopService(new Intent(MainActivity.this, OverlayService.class));
+                ui.postDelayed(new Runnable() {
+                    @Override public void run() {
+                        startService(new Intent(MainActivity.this, OverlayService.class));
+                        refresh();
+                    }
+                }, 800L);
             }
         }));
 
