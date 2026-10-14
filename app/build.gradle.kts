@@ -50,16 +50,7 @@ android {
         }
     }
 
-    // 两个变体：full = 带车辆信号权限；nocar = 移除 car 权限（渠道检测对照实验）
-    flavorDimensions += "perm"
-    productFlavors {
-        create("full") {
-            dimension = "perm"
-        }
-        create("nocar") {
-            dimension = "perm"
-        }
-    }
+    // 车辆信号走厂商 HAL，需要零 car 权限；不再需要按权限切变体
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

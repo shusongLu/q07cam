@@ -2,7 +2,6 @@ package com.lushu.q07battery
 
 import android.app.Activity
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Bundle
@@ -57,7 +56,6 @@ class MainActivity : Activity() {
         findViewById<Button>(R.id.btnOverlay).setOnClickListener { startOverlay() }
 
         refreshDisplays()
-        ensureCarPermissions()
         PluginRuntime.ensureStarted(this)
 
         if (intent?.getBooleanExtra(EXTRA_START_OVERLAY, false) == true) {
@@ -83,47 +81,21 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
-    // ---------- 车辆信号权限 ----------
-
-    /** CAR_ENERGY / CAR_SPEED 是 dangerous，必须运行时申请。 */
-    private fun ensureCarPermissions() {
-        val missing = CAR_PERMISSIONS.filter {
-            checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
-        }
-        if (missing.isNotEmpty()) {
-            requestPermissions(missing.toTypedArray(), REQ_CAR_PERMISSIONS)
-        }
-    }
-
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray,
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode != REQ_CAR_PERMISSIONS) return
-        val denied = permissions.filterIndexed { i, _ ->
-            i >= grantResults.size || grantResults[i] != PackageManager.PERMISSION_GRANTED
-        }
-        if (denied.isEmpty()) {
-            toast("车辆信号权限已授予")
-            PluginRuntime.reload(this)
-        } else {
-            toast("被拒绝：${denied.joinToString { it.substringAfterLast('.') }}\n可用 adb 授予：pm grant $packageName <权限>")
-        }
-    }
-
     // ---------- 渲染 ----------
 
     private fun render(s: VehicleSignals) {
         tvPower.text = "%.1f kW".format(s.batteryPowerKw)
         tvGearSpeed.text = "%s  ·  %.0f km/h".format(Gear.label(s.gear), s.speedKph)
         tvSoc.text = "电量 %.0f%%  续航 %.0f km  油 %.0f%%".format(s.socPercent, s.rangeKm, s.fuelPercent)
-        tvTurn.text = if (s.turnSignal == TurnSignal.OFF) {
-            "转向灯：本车需特权权限，暂不可读"
-        } else {
-            "转向灯：${s.turnSignal.name}"
-        }
+        tvTurn.text = "转速 %s   ·   转向灯 %s".format(
+            if (s.engineRunning) "${s.engineRpm} rpm" else "EV（增程器未启动）",
+            when (s.turnSignal) {
+                TurnSignal.OFF -> "关"
+                TurnSignal.LEFT -> "左"
+                TurnSignal.RIGHT -> "右"
+                TurnSignal.HAZARD -> "双闪"
+            },
+        )
         tvRaw.text = "原始值：${s.rawDebug}"
         presentation?.render(s)
     }
@@ -202,11 +174,5 @@ class MainActivity : Activity() {
     private companion object {
         /** `am start -n <pkg>/.MainActivity --ez start_overlay true` */
         const val EXTRA_START_OVERLAY = "start_overlay"
-        const val REQ_CAR_PERMISSIONS = 0x0700
-
-        val CAR_PERMISSIONS = arrayOf(
-            "android.car.permission.CAR_ENERGY",
-            "android.car.permission.CAR_SPEED",
-        )
     }
 }
