@@ -137,6 +137,25 @@ sendMsgToHud / sendMessageToHud / sendHUDMsgToQnx(0x11) / setHudAutoBrightness2Q
 **解读**：HUD 是个**封闭渲染器**，内容类型固定（车速 / 导航地图 / ADS-SR），
 Android 侧能做的只有「**选模式 + 发状态**」。地图/SR 的数据**从哪来**还没定位。
 
+### 3.6 地图 + SR 是「高德系地图 SDK」画的
+
+`soa4.dex` 里 `CAR_ACCOMP_SR_HUD_NOT_RENDER` 所在的常量类是一个**地图/导航常量表**：
+
+```
+CALL_ZOOM_IN_MAP_SUCCESS/FAILED_*      CALL_VIEW_ENTIRE_ROUTE_*      CALL_TURN_PAGE_SUCCESS
+CHANGE_DEST / CHANGE_PATH / CHANGE_STRATEGY / CAN_NOT_FOUND_PATHID_IN_FIRST
+CAR_2D / CAR_3D / CARSPACING / CAR_CLICK / CAR_ID / CAR_LOSE / CARINTERSECTLEFT/RIGHT
+CD701_EV / CD701_G / CD701_REEV / CHANGAN_REPAIR / CHANGAN_SALES / CA_PLATFORM_8155 / CA_PLATFORM_X9U
+CA_LOGOUT_BUT_GD_LOGIN          ← “GD” = 高德
+CAR_ACCOMP_COND_NOT_MEET / CAR_ACCOMP_NO_SLOT / CAR_ACCOMP_SR_HUD_NOT_RENDER
+```
+
+即：**地图和 SR（周围车辆 3D）由导航里的高德系 SDK 渲染**，SDK 里还有 `isHUD`、`THEME_HUD_DIR`。
+
+→ **N-1（Android 导航 App 产出 HUD 内容）可能性大幅上升**。
+→ 下一步必须拿 `com.incall.apps.navi` / `com.incall.apps.navi.service` 的 APK 来 REA。
+
+
 → **待验证**：HUD 导航模式打开时，Android 侧到底多了什么（新 display？新图层？新进程？新 type？）。
 
 ## 4. 可行的替代
