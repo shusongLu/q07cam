@@ -21,6 +21,8 @@ public class Prefs {
     public static final String KEY_CAM_H = "cam_h";
     // 编辑模式（可拖动/缩放）
     public static final String KEY_EDIT = "edit";
+    // 主题：dark | light | system
+    public static final String KEY_THEME = "theme";
     // 开机自启
     public static final String KEY_BOOT = "boot";
 

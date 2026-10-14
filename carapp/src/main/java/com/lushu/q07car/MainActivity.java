@@ -2,11 +2,12 @@ package com.lushu.q07car;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.content.res.ColorStateList;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
-import android.content.res.ColorStateList;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -14,8 +15,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.util.Log;
-import android.util.TypedValue;
-import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -30,33 +29,41 @@ import android.widget.TextView;
 import java.util.Arrays;
 
 /**
- * 配置界面（深色卡片风格）。
+ * 配置界面：主题、实时数据、悬浮窗开关、布局编辑、侧摄像头预连、开机自启、自检。
  */
 public class MainActivity extends Activity {
 
     private static final String TAG = "Q07Car";
 
-    // 配色
-    private static final int C_BG = 0xFF0B0E13;
-    private static final int C_CARD = 0xFF151A21;
-    private static final int C_BORDER = 0xFF232C38;
-    private static final int C_ACCENT = 0xFF4C8DFF;
-    private static final int C_TEXT = 0xFFE8EDF3;
-    private static final int C_SUB = 0xFF93A1B2;
-    private static final int C_OK = 0xFF34D399;
-    private static final int C_WARN = 0xFFFBBF24;
-    private static final int C_OFF = 0xFF6B7684;
+    private static final String THEME_DARK = "dark";
+    private static final String THEME_LIGHT = "light";
+    private static final String THEME_SYSTEM = "system";
+
+    // 调色板（按主题切换）
+    private int cBg, cCard, cBorder, cText, cSub, cAccent, cOk, cOff, cRipple;
 
     private TextView status;
     private TextView diag;
+    private LinearLayout liveBox;
+    private TextView liveHint;
+    private String liveKey = "";
     private final Handler ui = new Handler(Looper.getMainLooper());
+
+    private boolean darkNow;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // 主题必须在 setContentView 之前定
+        darkNow = resolveDark();
+        setTheme(darkNow
+                ? android.R.style.Theme_Material_NoActionBar
+                : android.R.style.Theme_Material_Light_NoActionBar);
+        applyPalette();
+
         super.onCreate(savedInstanceState);
 
         ScrollView scroll = new ScrollView(this);
-        scroll.setBackgroundColor(C_BG);
+        scroll.setBackgroundColor(cBg);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         int p = dp(18);
@@ -68,30 +75,39 @@ public class MainActivity extends Activity {
         title.setText("Q07 实时数据");
         title.setTextSize(28f);
         title.setTypeface(null, Typeface.BOLD);
-        title.setTextColor(C_TEXT);
+        title.setTextColor(cText);
         root.addView(title);
 
-        TextView sub = new TextView(this);
-        sub.setText("长安启源 Q07 · 悬浮窗控制台");
-        sub.setTextSize(14f);
-        sub.setTextColor(C_SUB);
-        sub.setPadding(0, dp(4), 0, dp(4));
-        root.addView(sub);
+        TextView subTitle = new TextView(this);
+        subTitle.setText("长安启源 Q07 · 悬浮窗控制台");
+        subTitle.setTextSize(14f);
+        subTitle.setTextColor(cSub);
+        subTitle.setPadding(0, dp(4), 0, dp(4));
+        root.addView(subTitle);
 
-        // ---------------- 状态 ----------------
+        // ---------------- 实时数据 ----------------
+        LinearLayout live = card(root, "实时数据");
+        liveHint = new TextView(this);
+        liveHint.setTextSize(13f);
+        liveHint.setTextColor(cSub);
+        live.addView(liveHint);
+        liveBox = new LinearLayout(this);
+        liveBox.setOrientation(LinearLayout.VERTICAL);
+        liveBox.setPadding(0, dp(6), 0, 0);
+        live.addView(liveBox);
+
+        // ---------------- 运行状态 ----------------
         LinearLayout st = card(root, "运行状态");
         status = new TextView(this);
         status.setTextSize(15f);
-        status.setTextColor(C_TEXT);
+        status.setTextColor(cText);
         status.setLineSpacing(dp(4), 1f);
         st.addView(status);
+
         LinearLayout btnRow = hrow(st);
         Button bStart = mkButton("启动", true);
         bStart.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                startServiceCompat();
-                refresh();
-            }
+            @Override public void onClick(View v) { startServiceCompat(); refresh(); }
         });
         addWide(btnRow, bStart, 1f);
 
@@ -117,11 +133,37 @@ public class MainActivity extends Activity {
         });
         addWide(btnRow, bPerm, 1f);
 
+        // ---------------- 外观 ----------------
+        LinearLayout theme = card(root, "外观");
+        final String[] tKeys = {THEME_SYSTEM, THEME_DARK, THEME_LIGHT};
+        final String[] tLabels = {"跟随系统", "深色", "浅色"};
+        String curTheme = Prefs.getStr(this, Prefs.KEY_THEME, THEME_SYSTEM);
+        final RadioGroup tg = new RadioGroup(this);
+        tg.setOrientation(RadioGroup.HORIZONTAL);
+        for (int i = 0; i < tKeys.length; i++) {
+            RadioButton rb = new RadioButton(this);
+            rb.setText(tLabels[i]);
+            rb.setTextSize(15f);
+            rb.setTextColor(cText);
+            rb.setButtonTintList(tint());
+            rb.setId(i);
+            if (tKeys[i].equals(curTheme)) rb.setChecked(true);
+            tg.addView(rb);
+        }
+        theme.addView(tg);
+        theme.addView(ghost("应用主题", new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                int id = tg.getCheckedRadioButtonId();
+                String key = (id >= 0 && id < tKeys.length) ? tKeys[id] : THEME_SYSTEM;
+                Prefs.putStr(MainActivity.this, Prefs.KEY_THEME, key);
+                recreate();
+            }
+        }));
+
         // ---------------- 布局 ----------------
         LinearLayout lay = card(root, "布局");
-        note(lay,
-                "打开编辑后：拖动面板 / 摄像头窗口可移动；拖摄像头右下角方块可缩放。\n"
-                        + "关掉后窗口恢复「穿透」，不再挡触摸。位置和大小会自动保存。");
+        note(lay, "打开编辑后：拖动面板 / 摄像头窗口可移动；拖摄像头右下角方块可缩放。\n"
+                + "关掉后窗口恢复「穿透」，不再挡触摸。位置和大小会自动保存。");
 
         Switch editSw = new Switch(this);
         styleSwitch(editSw, "编辑布局（可拖动 / 缩放）");
@@ -143,9 +185,8 @@ public class MainActivity extends Activity {
 
         // ---------------- 摄像头 ----------------
         LinearLayout cam = card(root, "侧摄像头预连");
-        note(cam,
-                "预连 = 开机就把该侧 RTSP 拉起来常驻，打灯只把窗口移进来 → 基本零延迟。\n"
-                        + "注意：服务端只有一路发送口，预连哪侧会把另一侧挤掉（切过去会慢一点）。");
+        note(cam, "预连 = 开机就把该侧 RTSP 拉起来常驻，打灯只把窗口移进来 → 基本零延迟。\n"
+                + "注意：服务端只有一路发送口，预连哪侧会把另一侧挤掉（切过去会慢一点）。");
 
         final String[] keys = {OverlayService.PRE_NONE, OverlayService.PRE_LEFT,
                 OverlayService.PRE_RIGHT, OverlayService.PRE_BOTH};
@@ -159,12 +200,8 @@ public class MainActivity extends Activity {
             RadioButton rb = new RadioButton(this);
             rb.setText(labels[i]);
             rb.setTextSize(15f);
-            rb.setTextColor(C_TEXT);
-            rb.setButtonTintList(new ColorStateList(
-                    new int[][]{
-                            new int[]{android.R.attr.state_checked},
-                            new int[]{-android.R.attr.state_checked}},
-                    new int[]{C_ACCENT, C_OFF}));
+            rb.setTextColor(cText);
+            rb.setButtonTintList(tint());
             rb.setId(i);
             if (keys[i].equals(cur)) rb.setChecked(true);
             group.addView(rb);
@@ -191,11 +228,12 @@ public class MainActivity extends Activity {
             }
         });
         boot.addView(bootSw);
-        note(boot, "Android 8+ 在开机广播里必须用 startForegroundService，之前用 startService 会静默失败 —— 已修。");
+        note(boot, "Android 8+ 在开机广播里必须用 startForegroundService，用 startService 会被静默拒绝 —— 已修。");
 
-        // ---------------- 诊断 ----------------
-        LinearLayout dg = card(root, "车辆数据自检");
-        dg.addView(ghost("读取一次（诊断）", new View.OnClickListener() {
+        // ---------------- 自检 ----------------
+        LinearLayout dg = card(root, "原始数据自检");
+        note(dg, "直接按属性 id 读一次，用来确认 SOA 通了、以及各下标含义。");
+        dg.addView(ghost("读取一次", new View.OnClickListener() {
             @Override public void onClick(View v) {
                 diag.setText("读取中…");
                 new Thread(new Runnable() {
@@ -204,20 +242,59 @@ public class MainActivity extends Activity {
             }
         }));
         diag = new TextView(this);
-        diag.setTextSize(13f);
-        diag.setTextColor(C_SUB);
+        diag.setTextSize(12f);
+        diag.setTextColor(cSub);
         diag.setTypeface(Typeface.MONOSPACE);
         diag.setPadding(0, dp(10), 0, 0);
         diag.setLineSpacing(dp(3), 1f);
         dg.addView(diag);
 
         setContentView(scroll);
+
+        // 实时数据刷新
+        ui.post(new Runnable() {
+            @Override public void run() {
+                refreshLive();
+                refresh();
+                ui.postDelayed(this, 500L);
+            }
+        });
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         refresh();
+    }
+
+    // ---------------------------------------------------------------- 主题
+
+    private boolean resolveDark() {
+        String t = Prefs.getStr(this, Prefs.KEY_THEME, THEME_SYSTEM);
+        if (THEME_DARK.equals(t)) return true;
+        if (THEME_LIGHT.equals(t)) return false;
+        int mode = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+        return mode == Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    private void applyPalette() {
+        if (darkNow) {
+            cBg = 0xFF0B0E13; cCard = 0xFF151A21; cBorder = 0xFF232C38;
+            cText = 0xFFE8EDF3; cSub = 0xFF93A1B2; cAccent = 0xFF4C8DFF;
+            cOk = 0xFF34D399; cOff = 0xFF6B7684; cRipple = 0x33FFFFFF;
+        } else {
+            cBg = 0xFFF3F5F9; cCard = 0xFFFFFFFF; cBorder = 0xFFE3E8EF;
+            cText = 0xFF111827; cSub = 0xFF6B7280; cAccent = 0xFF2563EB;
+            cOk = 0xFF059669; cOff = 0xFF9CA3AF; cRipple = 0x22000000;
+        }
+    }
+
+    private ColorStateList tint() {
+        return new ColorStateList(
+                new int[][]{
+                        new int[]{android.R.attr.state_checked},
+                        new int[]{-android.R.attr.state_checked}},
+                new int[]{cAccent, cOff});
     }
 
     // ---------------------------------------------------------------- 样式工具
@@ -237,7 +314,7 @@ public class MainActivity extends Activity {
     private LinearLayout card(LinearLayout parent, String titleText) {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setBackground(round(C_CARD, C_BORDER, 16));
+        box.setBackground(round(cCard, cBorder, 16));
         int pad = dp(16);
         box.setPadding(pad, pad, pad, pad);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -249,35 +326,34 @@ public class MainActivity extends Activity {
         t.setText(titleText);
         t.setTextSize(17f);
         t.setTypeface(null, Typeface.BOLD);
-        t.setTextColor(C_TEXT);
+        t.setTextColor(cText);
         box.addView(t);
 
         parent.addView(box);
         return box;
     }
 
-    private TextView note(LinearLayout parent, String s) {
+    private void note(LinearLayout parent, String s) {
         TextView tv = new TextView(this);
         tv.setText(s);
         tv.setTextSize(13f);
-        tv.setTextColor(C_SUB);
+        tv.setTextColor(cSub);
         tv.setLineSpacing(dp(3), 1f);
         tv.setPadding(0, dp(8), 0, dp(8));
         parent.addView(tv);
-        return tv;
     }
 
     private void styleSwitch(Switch sw, String text) {
         sw.setText(text);
         sw.setTextSize(15f);
-        sw.setTextColor(C_TEXT);
+        sw.setTextColor(cText);
         sw.setPadding(0, dp(8), 0, dp(8));
         sw.setThumbTintList(new ColorStateList(
                 new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
-                new int[]{C_ACCENT, C_OFF}));
+                new int[]{cAccent, cOff}));
         sw.setTrackTintList(new ColorStateList(
                 new int[][]{new int[]{android.R.attr.state_checked}, new int[]{}},
-                new int[]{0x664C8DFF, 0x33000000}));
+                new int[]{darkNow ? 0x664C8DFF : 0x552563EB, darkNow ? 0x33000000 : 0x22000000}));
     }
 
     private LinearLayout hrow(LinearLayout parent) {
@@ -294,17 +370,17 @@ public class MainActivity extends Activity {
         b.setAllCaps(false);
         b.setTextSize(15f);
         b.setTypeface(null, Typeface.BOLD);
-        b.setTextColor(primary ? Color.WHITE : C_ACCENT);
+        b.setTextColor(primary ? Color.WHITE : cAccent);
         b.setBackground(new RippleDrawable(
-                ColorStateList.valueOf(0x33FFFFFF),
-                round(primary ? C_ACCENT : Color.TRANSPARENT, primary ? 0 : 0x664C8DFF, 22),
+                ColorStateList.valueOf(cRipple),
+                round(primary ? cAccent : Color.TRANSPARENT,
+                        primary ? 0 : (darkNow ? 0x664C8DFF : 0x552563EB), 22),
                 null));
         b.setPadding(dp(18), dp(10), dp(18), dp(10));
         b.setStateListAnimator(null);
         return b;
     }
 
-    /** 填满一整行的主按钮 */
     private Button primary(String text, View.OnClickListener l) {
         Button b = mkButton(text, true);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -315,7 +391,6 @@ public class MainActivity extends Activity {
         return b;
     }
 
-    /** 填满一整行的次要按钮 */
     private Button ghost(String text, View.OnClickListener l) {
         Button b = mkButton(text, false);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -333,6 +408,7 @@ public class MainActivity extends Activity {
         v.setLayoutParams(lp);
         row.addView(v);
     }
+
     // ---------------------------------------------------------------- 行为
 
     private void startServiceCompat() {
@@ -345,11 +421,7 @@ public class MainActivity extends Activity {
         stopService(new Intent(this, OverlayService.class));
         ui.postDelayed(new Runnable() {
             @Override public void run() {
-                try {
-                    startServiceCompat();
-                } catch (Throwable t) {
-                    Log.e(TAG, "重启服务失败: " + t);
-                }
+                try { startServiceCompat(); } catch (Throwable t) { Log.e(TAG, "重启服务失败: " + t); }
                 ui.postDelayed(new Runnable() {
                     @Override public void run() { refresh(); }
                 }, 1500L);
@@ -368,6 +440,49 @@ public class MainActivity extends Activity {
                 + "\n包名          " + getPackageName());
     }
 
+    /** 把服务里的实时数据快照画成两列表格。 */
+    private void refreshLive() {
+        String[] rows = OverlayService.liveRows;
+        boolean ok = OverlayService.liveOk;
+        if (!ok || rows == null || rows.length == 0) {
+            liveHint.setText("暂无数据 —— 悬浮窗服务未运行，或本机不是车机（读不到 SOA）。");
+            liveBox.removeAllViews();
+            liveKey = "";
+            return;
+        }
+        liveHint.setText("来自厂商 SOA（每 0.4 秒刷新）");
+        StringBuilder key = new StringBuilder();
+        for (String r : rows) key.append(r).append(';');
+        if (key.toString().equals(liveKey)) return;   // 没变就不重建视图
+        liveKey = key.toString();
+
+        liveBox.removeAllViews();
+        for (String r : rows) {
+            int i = r.indexOf('|');
+            if (i < 0) continue;
+            LinearLayout line = new LinearLayout(this);
+            line.setOrientation(LinearLayout.HORIZONTAL);
+            line.setPadding(0, dp(5), 0, dp(5));
+
+            TextView k = new TextView(this);
+            k.setText(r.substring(0, i));
+            k.setTextSize(14f);
+            k.setTextColor(cSub);
+            k.setLayoutParams(new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            line.addView(k);
+
+            TextView v = new TextView(this);
+            v.setText(r.substring(i + 1));
+            v.setTextSize(15f);
+            v.setTypeface(null, Typeface.BOLD);
+            v.setTextColor(cAccent);
+            line.addView(v);
+
+            liveBox.addView(line);
+        }
+    }
+
     // ---------------------------------------------------------------- SOA 自检
 
     private void diag(final String s) {
@@ -380,7 +495,7 @@ public class MainActivity extends Activity {
     private void runDiagnostics() {
         Object[][] want = {
                 {0x00418037, 0, "挡位"},
-                {0x00418006, 0, "车速(0.1km/h)"},
+                {0x00418006, 0, "车速"},
                 {0x00419788, 25, "电量%"},
                 {0x00419307, 12, "高压电压"},
                 {0x00412055, 0, "剩余里程"},
@@ -397,7 +512,7 @@ public class MainActivity extends Activity {
                 int[] a = soa.read(id);
                 String v = (a == null) ? "null"
                         : (idx < a.length ? String.valueOf(a[idx]) : Arrays.toString(a));
-                diag(String.format("0x%08X %-14s = %s", id, w[2], v));
+                diag(String.format("0x%08X %-10s = %s", id, w[2], v));
             }
         } catch (Throwable t) {
             diag("自检异常: " + t);

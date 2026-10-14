@@ -91,6 +91,14 @@ public class OverlayService extends Service {
     private volatile String lastText = "";
 
     /**
+     * 给 App 页面用的实时数据快照，每项是 "名称|值"。
+     * 由数据轮询线程写入，主线程读 —— 都是 volatile 数组引用，安全。
+     */
+    public static volatile String[] liveRows = new String[0];
+    /** 数据是否有效（SOA 是否连上） */
+    public static volatile boolean liveOk = false;
+
+    /**
      * 当前转向状态：0 关 / 1 左 / 2 右 / 3 双闪。
      * 只有在"同一次读数里左右同时亮"才判定双闪（并要求连续两次，防抖动），
      * 否则以最近一次单独亮起的那一侧为准 —— 这样右->左快速切换能立刻生效。
@@ -406,8 +414,28 @@ public class OverlayService extends Service {
             if ((a = soa.read(ID_REEV_OPER)) != null) {
                 for (int i = 0; i < reev.length && i < a.length; i++) reev[i] = a[i];
             }
+            liveOk = true;
+            publishLive();
         } catch (Throwable ignored) {
         }
+    }
+
+    /** 把当前数据打包给 App 页面显示。 */
+    private void publishLive() {
+        liveRows = new String[]{
+                "实时功率|" + String.format(Locale.US, "%.1f kW", kwPdu),
+                "高压电压|" + String.format(Locale.US, "%.0f V", hvVolt),
+                "母线电压|" + String.format(Locale.US, "%.1f V", pduVolt),
+                "电池电流|" + String.format(Locale.US, "%.1f A", pduCur),
+                "电量|" + String.format(Locale.US, "%.0f %%", socPct),
+                "剩余里程|" + String.format(Locale.US, "%.0f km", rangeKm),
+                "总里程|" + String.format(Locale.US, "%.0f km", totalKm),
+                "挡位|" + gearName(gear, gearInvalid),
+                "车速|" + String.format(Locale.US, "%.1f km/h", speed),
+                "电源|" + powerShiftName(powerShift),
+                "转向灯|" + turnName(turnState()),
+                "增程器|" + reev[0] + " / " + reev[1] + " / " + reev[2] + " / " + reev[6],
+        };
     }
 
     /** 只读转向灯，供高频线程调用。 */
