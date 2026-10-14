@@ -65,7 +65,7 @@ public class OverlayService extends Service {
     private static final String RTSP_LEFT = "rtsp://172.16.6.26:8888/lt";
     private static final String RTSP_RIGHT = "rtsp://172.16.6.26:8888/rt";
     /** 换边时的间隔：等旧 RTSP 会话释放（厂商 AVM 也是这么做的）。 */
-    private static final long SWITCH_DELAY_MS = 450L;
+    private static final long SWITCH_DELAY_MS = 250L;
 
     public static volatile boolean running = false;
 
@@ -150,20 +150,22 @@ public class OverlayService extends Service {
             }
         }, "q07-turn").start();
 
+        // 数据轮询也放后台：一次读 10 个属性约 200ms，跑在主线程会堵住界面节拍
+        new Thread(new Runnable() {
+            @Override public void run() {
+                while (true) {
+                    poll();
+                    try { Thread.sleep(400L); } catch (InterruptedException e) { return; }
+                }
+            }
+        }, "q07-poll").start();
+
         // 界面节拍：只做渲染 + 摄像头窗口切换（不读 SOA，很快）
         handler.post(new Runnable() {
             @Override public void run() {
                 render();
                 updateCamera();
                 handler.postDelayed(this, 100L);
-            }
-        });
-
-        // 数据节拍：SOA 读取较慢（10 个属性约 200ms），单独放 400ms
-        handler.post(new Runnable() {
-            @Override public void run() {
-                poll();
-                handler.postDelayed(this, 400L);
             }
         });
         running = true;
