@@ -66,14 +66,84 @@ Vehicle.energyRecycle.tripEnergyConsume
 
 ## 待补
 
-- 能量电池服务文档（功率/电流/SOC 的完整 key 与取值）
-- 车灯服务文档（转弯灯 key）
+- 能量电池服务文档后半部分（功率/输出电流/剩余里程）—— 快照被截断
 - 「获取和监听方法说明」文档（`CaSdkManager` 的用法）
 
-## 与 SOA 的关系（重要）
+---
+
+## 能量电池服务（`Vehicle.energyRecycle.*`）
+
+| 信号 | key |
+|---|---|
+| 能量回收强度模式 | `energyRecycleMode`（0 无设置；1 标准；2 强；0x3-0x67=0-100%；0x68 弱）|
+| 充电锁自动解锁 | `chargeConnectStatus` |
+| 充电口解闭锁 | `vcuChrglockSts`（0 其他、1 解锁到位、2 锁止到位）|
+| 充电口提示 | `chargePortSwitchTips` |
+| 能量工况模式 | `energyCnSelect`（CLTC/WLTC/动态续航）|
+| 高压激活反馈 | `batteryHvMode`（0 Initializing 1 Standby 2 PreCharge 3 HVActive 4 Powerdown 5 Failure 7 ReadytoSleep）|
+| 能耗选项 | `energyUiOption` |
+| 能量显示方式 | `energyUiStyle`（0 电量百分比 / 1 里程）|
+| 预约充电 | `reChargeInfo` |
+| **小电池(12V)信息** | **`ibsInfo`** → int[]：`[0]`U_Batt 电压(mV 0~32767)、`[3]`I_BATT 充电电流(分段精度)、`[10]`SOC(%) … |
+| 输出电流 | `outPutCurrent`（代码里挖到）|
+| 交/直流输出电压 | `dcAcOutPutU`（代码里挖到）|
+| 电池余量 | `remainingElectric`（代码里挖到）|
+| 剩余里程 | `restMileInfo`（代码里挖到）|
+| 近 10/30/50/100km 能耗 | `tenKmAvgUse` / `nearlyThirtyEgy` / `fiftyKmAvgUse` / `hundredKmAvgUse` … |
+
+> 注意：`ibsInfo` 是**12V 蓄电池**的智能传感器，不是动力电池。
+> 动力电池的电流/电压要看 `Vehicle.drive.totalCurrent` / `Vehicle.energyRecycle.outPutCurrent` / `dcAcOutPutU`。
+
+---
+
+## 车灯服务（`Vehicle.light.*`）—— 每个接口都带「分析日志TAG」
+
+**这个 TAG 就是 SDK key → SOA 内部信号名的映射表！**
+
+| SDK key | 说明 | 日志 TAG（SOA 信号名）|
+|---|---|---|
+| `frontLightStatus` | 前灯（0 关/1 位置灯/2 位置+近光/3 自动）| `Cnr_HdLampCtrl.Ntf_HdLampRunMod` |
+| `rearFogLightStatus` | 后雾灯 | `Cnr_ReFogCtrl.Ntf_ReFogRunSt` |
+| `frontFogLampStatus` | 前雾灯 | `Basc_ExtrLiActCtrlInfo.Ntf_FogInfo` |
+| **`highBeamStatus`** | 远光灯 | **`Basc_ExtrLiActCtrlInfo.Ntf_HiBeamInfo`** |
+| `autoHighBeamStatus` | 自动远光 | `vehicle.light.autoHighBeamStatus` |
+| `backLightLevel` | 背景光等级 | `Basc_InnrLiSet.Ntf_BackGroundLiLvl` |
+| `btnLightLevel` | 按键背光 | `Enh_BackGroundLi.Ntf_LiInten` |
+| `domeLightStatus` | 顶灯联动 | — |
+| 各区域氛围灯服务状态 | 中控/hud/A柱/顶灯/脚灯/车门/储物箱… | — |
+
+> **转向灯**：对应 `Basc_ExtrLiActCtrlInfo.Ntf_TurnLiInfo`（同一命名族），
+> 与 logcat 实测 `0x419831 = Basc_ExtrLiActCtrlInfo.Ntf_TurnLiInfo` 完全一致。
+
+---
+
+## 打通两条线的关键
+
+```
+SDK key (文档)  →  SOA 信号名 (文档的"分析日志TAG" / logcat)  →  SOA id (logcat 实测)
+Vehicle.drive.gearLevel   →  Basc_GearBasInfo.Ntf_GearBasInfo   →  0x418045
+Vehicle.light.highBeamStatus → Basc_ExtrLiActCtrlInfo.Ntf_HiBeamInfo → 0x419831(族)
+```
+
+**但要记住**：logcat 里的这些 id 是**服务端内部 id，客户端 `getProperty` 读不到**（返回 null）。
+客户端可见的是另一套 id（`0x40xxxx`/`0x41xxxx`/`0x7085xx`/`0xE0xxxx`，共 2102 个）。
+
+**所以最终要靠"取值域 + 行为"把客户端 id 认出来**：
+| 目标 | 取值特征（来自文档）|
+|---|---|
+| 档位 | `1~5`，且挂挡时变 |
+| 车速 | `0~460` |
+| 总电流 | `-255` 或 `0~1000` |
+
+**下一步**：开车/挂挡时跑 SOA 全量监视器，按上面的取值特征对号入座。
+
+---
+
+## 与 SOA 的关系（要点）
 
 - 车机上 SOA HIDL 服务 `android.hardware.automotive.soabridge@1.0::ISoaBridgeNative`
-  对任何进程开放（SELinux Permissive），已验证可连、可读 2102 个属性
-- 但 HAL 只认**数字 id**；上面的 `Vehicle.xxx` **名字**由厂商 SDK 映射到 id
-- 下一步：用"名字对应的已知取值域"（如档位 1~5、车速 0~460、电流 -255~1000）
-  对 SOA 里变化的 id 做**行为标定**，把 id 认出来
+  对任何进程开放（SELinux Permissive），已验证可连、可读 **2102** 个属性
+- 但 HAL 只认**数字 id**；`Vehicle.xxx` 这类**名字**由厂商 SDK（`CaSdkManager` /
+  `casdkmanager`）映射到 id
+- 文档里的「分析日志TAG」把 **SDK key → SOA 内部信号名** 打通了
+- 剩下的最后一跳（SOA 信号名 → 客户端可见 id）用**行为 + 取值域**标定
