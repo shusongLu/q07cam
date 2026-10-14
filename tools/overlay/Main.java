@@ -52,6 +52,9 @@ public class Main {
     private static final float PDU_CURRENT_SCALE_DEFAULT = 0.01f;
     private static volatile float PDU_CURRENT_SCALE = PDU_CURRENT_SCALE_DEFAULT;
 
+    /** 车速原始值是 0.1 km/h（文档量程 0~460 km/h → 原始 0~4600）。 */
+    private static final float SPEED_SCALE = 0.1f;
+
     /** 转向灯"保持"窗口：闪烁间隔约 720ms，2.5s 内没再收到就认为已关。 */
     private static final long TURN_HOLD_MS = 2500L;
 
@@ -183,7 +186,7 @@ public class Main {
         try {
             int[] a;
             if ((a = read(ID_GEAR_POSN)) != null && a.length >= 2) { gear = a[0]; gearInvalid = a[1]; }
-            if ((a = read(ID_VEH_SPD)) != null && a.length >= 1) { speed = a[0]; }
+            if ((a = read(ID_VEH_SPD)) != null && a.length >= 1) { speed = a[0] * SPEED_SCALE; }
             if ((a = read(ID_POWER_SHIFT)) != null && a.length >= 1) { powerShift = a[0]; }
             if ((a = read(ID_RESI_MILG)) != null && a.length >= 1) { rangeKm = a[0]; }
             if ((a = read(ID_TOTAL_MILG)) != null && a.length >= 1) { totalKm = a[0]; }
@@ -217,7 +220,7 @@ public class Main {
                 pduVolt, pduCur, hvVolt), 0.8f, 0xFF9ACD32, false);
         append(sb, String.format(Locale.US, "\n电量 %.0f%%   ·   续航 %.0f km   ·   总里程 %.0f km",
                 socPct, rangeKm, totalKm), 1f, 0xFFE6EDF3, false);
-        append(sb, String.format(Locale.US, "\n挡位 %s   ·   %.0f km/h   ·   电源 %s   ·   转向 %s",
+        append(sb, String.format(Locale.US, "\n挡位 %s   ·   %.1f km/h   ·   电源 %s   ·   转向 %s",
                 gearName(gear, gearInvalid), speed, powerShiftName(powerShift), turnName(turn)),
                 1f, 0xFFE6EDF3, false);
         append(sb, String.format(Locale.US,
