@@ -168,7 +168,7 @@ class DefaultVehiclePlugin : VehiclePlugin {
         const val POWER_W_TO_KW = 0.001f
         /** 功率正负号：+1 保持原值；若与预期相反改成 -1。 */
         const val POWER_SIGN = 1f
-        const val LEVEL_DIVISOR = 1000f
+        const val LEVEL_DIVISOR = 3000f
         const val RANGE_DIVISOR = 1000f
         const val FUEL_DIVISOR = 1000f
         /** PERF_VEHICLE_SPEED → km/h（若实车为 m/s 则改成 3.6）。 */

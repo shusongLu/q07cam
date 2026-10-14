@@ -20,6 +20,7 @@ keystore.properties
 # 本地产物（不入库）
 shots/
 tools/out/
+tools/out-overlay/
 recon/recon-out/
 recon/apks-manual/
 recon/libs/
