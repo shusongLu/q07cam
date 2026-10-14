@@ -89,6 +89,20 @@ foreach ($d in $depDirs) {
 
 Write-Host "启动悬浮窗 …" -ForegroundColor Cyan
 Invoke-Adb @("shell", "rm -f /data/local/tmp/q07overlay.log") | Out-Null
+
+# 侧摄像头播放器（厂商 libffmpeg.so，H.265 RTSP）
+$libDev = "/data/local/tmp/q07lib/libffmpeg.so"
+$libLocal = Join-Path $repo "tools\out-overlay\libffmpeg.so"
+if ((Invoke-Adb @("shell", "ls $libDev 2>/dev/null")) -notmatch "libffmpeg") {
+    if (Test-Path $libLocal) {
+        Write-Host "  推送 libffmpeg.so …" -ForegroundColor DarkGray
+        Invoke-Adb @("shell", "mkdir -p /data/local/tmp/q07lib") | Out-Null
+        Invoke-Adb @("push", $libLocal, $libDev) | Out-Null
+    } else {
+        Write-Host "  ⚠ 缺 libffmpeg.so（侧摄像头不可用）—— 跑 tools\build-overlay.ps1 -Push 生成" -ForegroundColor Red
+    }
+}
+
 Invoke-Adb @("shell", "CLASSPATH=$cp app_process /system/bin q07overlay.Main > /data/local/tmp/q07overlay.log 2>&1 &") | Out-Null
 Start-Sleep -Seconds 5
 

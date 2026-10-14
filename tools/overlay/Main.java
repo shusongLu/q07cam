@@ -11,8 +11,13 @@ import android.text.style.ForegroundColorSpan;
 import android.text.style.RelativeSizeSpan;
 import android.text.style.StyleSpan;
 import android.view.Gravity;
+import android.view.Surface;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
 import android.view.WindowManager;
 import android.widget.TextView;
+
+import com.incall.camedia.CaMediaPlayer;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -58,6 +63,16 @@ public class Main {
     /** 转向灯"保持"窗口：闪烁间隔约 720ms，2.5s 内没再收到就认为已关。 */
     private static final long TURN_HOLD_MS = 2500L;
 
+    // ---------------------------------------------------------------- 侧摄像头（RTSP + 厂商 FFmpeg）
+    /** 车机自带的侧视 RTSP 流（H.265）。 */
+    private static final String RTSP_LEFT = "rtsp://172.16.6.26:8888/lt";
+    private static final String RTSP_RIGHT = "rtsp://172.16.6.26:8888/rt";
+    /** 摄像头窗口：贴在文字面板正下方。 */
+    private static final int CAM_W = 720;
+    private static final int CAM_H = 405;
+    private static final int CAM_X = 470;
+    private static final int CAM_Y = 745;
+
     private static TextView tvMain;
 
     private static volatile float kwPdu, pduVolt, pduCur, hvVolt, socPct, rangeKm, totalKm, speed;
@@ -66,6 +81,15 @@ public class Main {
     private static volatile int gear = -1, gearInvalid = -1, powerShift = -1, pduRaw0 = -1, pduRaw22 = -1, pduRaw8 = -1;
 
     private static volatile long lastLeftTurnAt = 0L, lastRightTurnAt = 0L, lastLogAt = 0L;
+
+    // ---------------------------------------------------------------- 摄像头状态
+    private static WindowManager wmRef;
+    private static Context ctxRef;
+    private static SurfaceView camView;
+    private static CaMediaPlayer camPlayer;
+    private static Surface camSurface;
+    private static String camUrl;
+    private static long lastCamLogAt = 0L;
 
     public static void main(String[] args) {
         try {
@@ -95,6 +119,8 @@ public class Main {
             lp.x = 470;
             lp.y = 170;
             wm.addView(tvMain, lp);
+            wmRef = wm;
+            ctxRef = ctx;
             System.out.println("[ovl] window added");
 
             if (!initSoa()) {
@@ -107,6 +133,7 @@ public class Main {
                 @Override public void run() {
                     poll();
                     render();
+                    updateCamera();
                     main.postDelayed(this, 300L);
                 }
             }, 100L);
@@ -270,6 +297,94 @@ public class Main {
             case 2: return "ON";
             case 3: return "START";
             default: return "--";
+        }
+    }
+
+    // ---------------------------------------------------------------- 侧摄像头
+
+    /**
+     * 转向灯亮 -> 弹出对应侧摄像头画面；灭 -> 关掉。
+     * 用 2.5s 保持窗口避免闪烁引起反复开关。
+     */
+    private static void updateCamera() {
+        int turn = turnState();
+        String want = (turn == 1) ? RTSP_LEFT : (turn == 2 || turn == 3) ? RTSP_RIGHT : null;
+
+        if (want == null) {
+            if (camUrl != null || camView != null) hideCam();
+            return;
+        }
+        if (want.equals(camUrl) && camView != null) return;
+        hideCam();
+        showCam(want);
+    }
+
+    private static void showCam(String url) {
+        try {
+            SurfaceView sv = new SurfaceView(ctxRef);
+            sv.getHolder().addCallback(new SurfaceHolder.Callback() {
+                @Override public void surfaceCreated(SurfaceHolder h) {
+                    camSurface = h.getSurface();
+                    startPlayback();
+                }
+                @Override public void surfaceChanged(SurfaceHolder h, int f, int w, int hh) {
+                }
+                @Override public void surfaceDestroyed(SurfaceHolder h) {
+                    stopPlayback();
+                    camSurface = null;
+                }
+            });
+
+            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                    CAM_W, CAM_H,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.OPAQUE);
+            lp.gravity = Gravity.TOP | Gravity.START;
+            lp.x = CAM_X;
+            lp.y = CAM_Y;
+            wmRef.addView(sv, lp);
+            camView = sv;
+            camUrl = url;
+            System.out.println("[cam] show " + url);
+        } catch (Throwable t) {
+            System.out.println("[cam] showCam failed: " + t);
+        }
+    }
+
+    private static void hideCam() {
+        stopPlayback();
+        if (camView != null && wmRef != null) {
+            try { wmRef.removeView(camView); } catch (Throwable ignored) {}
+        }
+        camView = null;
+        camSurface = null;
+        if (camUrl != null) System.out.println("[cam] hide");
+        camUrl = null;
+    }
+
+    private static void startPlayback() {
+        if (camPlayer != null || camSurface == null || camUrl == null) return;
+        try {
+            CaMediaPlayer p = new CaMediaPlayer();
+            int r1 = p.setDataSource(camUrl);
+            int r2 = p.setSurface(camSurface);
+            int r3 = p.play(camSurface);
+            camPlayer = p;
+            System.out.println("[cam] " + camUrl + " setDataSource=" + r1 + " setSurface=" + r2 + " play=" + r3);
+        } catch (Throwable t) {
+            System.out.println("[cam] startPlayback failed: " + t);
+            camPlayer = null;
+        }
+    }
+
+    private static void stopPlayback() {
+        if (camPlayer != null) {
+            try { camPlayer.close(); } catch (Throwable ignored) {}
+            try { camPlayer.release(); } catch (Throwable ignored) {}
+            camPlayer = null;
         }
     }
 
