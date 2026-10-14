@@ -7,6 +7,20 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
     <!--
+      AAOS 车辆信号（无需 root、无需厂商 SDK）：
+      CAR_ENERGY  = dangerous → 运行时申请即可（功率/电量/续航/油量）
+      CAR_SPEED   = dangerous → 运行时申请即可（车速）
+      CAR_POWERTRAIN = normal → 安装即授予（挡位/点火）
+      required=false 便于在普通手机上做热更联调；车机上照常生效。
+    -->
+    <uses-feature
+        android:name="android.hardware.type.automotive"
+        android:required="false" />
+    <uses-permission android:name="android.car.permission.CAR_ENERGY" />
+    <uses-permission android:name="android.car.permission.CAR_SPEED" />
+    <uses-permission android:name="android.car.permission.CAR_POWERTRAIN" />
+
+    <!--
       将来要用的组件必须在这里一次性声明好：
       热更能改逻辑，但改不了 manifest。插件可通过运行时 registerReceiver / bindService
       使用下面声明的服务。

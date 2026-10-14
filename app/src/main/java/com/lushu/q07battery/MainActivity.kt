@@ -2,6 +2,7 @@ package com.lushu.q07battery
 
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Bundle
@@ -11,13 +12,14 @@ import android.view.Surface
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
+import com.lushu.q07battery.core.Gear
 import com.lushu.q07battery.core.TurnSignal
 import com.lushu.q07battery.core.VehicleSignals
 import com.lushu.q07battery.ui.DashboardPresentation
 
 /**
  * 中控主界面（壳）。
- * 业务逻辑在热更插件里，这里只负责显示 + 提供调试入口。
+ * 业务逻辑在热更插件里，这里只负责显示 + 权限申请 + 调试入口。
  */
 class MainActivity : Activity() {
 
@@ -25,9 +27,10 @@ class MainActivity : Activity() {
 
     private lateinit var tvPlugin: TextView
     private lateinit var tvPower: TextView
-    private lateinit var tvRpm: TextView
+    private lateinit var tvGearSpeed: TextView
     private lateinit var tvSoc: TextView
     private lateinit var tvTurn: TextView
+    private lateinit var tvRaw: TextView
     private lateinit var tvDisplays: TextView
 
     private val onSignals: (VehicleSignals) -> Unit = { render(it) }
@@ -39,9 +42,10 @@ class MainActivity : Activity() {
 
         tvPlugin = findViewById(R.id.tvPlugin)
         tvPower = findViewById(R.id.tvPower)
-        tvRpm = findViewById(R.id.tvRpm)
+        tvGearSpeed = findViewById(R.id.tvRpm)
         tvSoc = findViewById(R.id.tvSoc)
         tvTurn = findViewById(R.id.tvTurn)
+        tvRaw = findViewById(R.id.tvRaw)
         tvDisplays = findViewById(R.id.tvDisplays)
 
         findViewById<Button>(R.id.btnReloadPlugin).setOnClickListener {
@@ -53,6 +57,7 @@ class MainActivity : Activity() {
         findViewById<Button>(R.id.btnOverlay).setOnClickListener { startOverlay() }
 
         refreshDisplays()
+        ensureCarPermissions()
         PluginRuntime.ensureStarted(this)
 
         if (intent?.getBooleanExtra(EXTRA_START_OVERLAY, false) == true) {
@@ -78,19 +83,48 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
+    // ---------- 车辆信号权限 ----------
+
+    /** CAR_ENERGY / CAR_SPEED 是 dangerous，必须运行时申请。 */
+    private fun ensureCarPermissions() {
+        val missing = CAR_PERMISSIONS.filter {
+            checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isNotEmpty()) {
+            requestPermissions(missing.toTypedArray(), REQ_CAR_PERMISSIONS)
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQ_CAR_PERMISSIONS) return
+        val denied = permissions.filterIndexed { i, _ ->
+            i >= grantResults.size || grantResults[i] != PackageManager.PERMISSION_GRANTED
+        }
+        if (denied.isEmpty()) {
+            toast("车辆信号权限已授予")
+            PluginRuntime.reload(this)
+        } else {
+            toast("被拒绝：${denied.joinToString { it.substringAfterLast('.') }}\n可用 adb 授予：pm grant $packageName <权限>")
+        }
+    }
+
     // ---------- 渲染 ----------
 
     private fun render(s: VehicleSignals) {
         tvPower.text = "%.1f kW".format(s.batteryPowerKw)
-        tvRpm.text = if (s.engineRunning) "${s.engineRpm} rpm" else "EV（发动机未启动）"
-        tvSoc.text = "SOC %.0f%% · %.0f V · %.0f A · %.0f km/h"
-            .format(s.socPercent, s.batteryVoltageV, s.batteryCurrentA, s.speedKph)
-        tvTurn.text = when (s.turnSignal) {
-            TurnSignal.OFF -> "转向灯: 关"
-            TurnSignal.LEFT -> "转向灯: 左（应显示左侧影像）"
-            TurnSignal.RIGHT -> "转向灯: 右（应显示右侧影像）"
-            TurnSignal.HAZARD -> "转向灯: 双闪"
+        tvGearSpeed.text = "%s  ·  %.0f km/h".format(Gear.label(s.gear), s.speedKph)
+        tvSoc.text = "电量 %.0f%%  续航 %.0f km  油 %.0f%%".format(s.socPercent, s.rangeKm, s.fuelPercent)
+        tvTurn.text = if (s.turnSignal == TurnSignal.OFF) {
+            "转向灯：本车需特权权限，暂不可读"
+        } else {
+            "转向灯：${s.turnSignal.name}"
         }
+        tvRaw.text = "原始值：${s.rawDebug}"
         presentation?.render(s)
     }
 
@@ -168,5 +202,11 @@ class MainActivity : Activity() {
     private companion object {
         /** `am start -n <pkg>/.MainActivity --ez start_overlay true` */
         const val EXTRA_START_OVERLAY = "start_overlay"
+        const val REQ_CAR_PERMISSIONS = 0x0700
+
+        val CAR_PERMISSIONS = arrayOf(
+            "android.car.permission.CAR_ENERGY",
+            "android.car.permission.CAR_SPEED",
+        )
     }
 }

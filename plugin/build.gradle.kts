@@ -31,12 +31,16 @@ val androidSdkDir: String =
                 ?: error("找不到 Android SDK：设置 ANDROID_HOME/ANDROID_SDK_ROOT，或在本仓库 local.properties 写 sdk.dir")
         }
 val androidJar = file("$androidSdkDir/platforms/android-37.0/android.jar")
+// AAOS 的 android.car 不在标准 android.jar 里，单独放在 optional/ 下；运行期由车机 BOOTCLASSPATH 提供
+val androidCarJar = file("$androidSdkDir/platforms/android-37.0/optional/android.car.jar")
 
 dependencies {
     // core 只编译期引用：运行时由壳 APK 提供，绝不能打进插件
     compileOnly(project(":core"))
     check(androidJar.exists()) { "找不到 android.jar: $androidJar" }
+    check(androidCarJar.exists()) { "找不到 android.car.jar: $androidCarJar" }
     compileOnly(files(androidJar))
+    compileOnly(files(androidCarJar))
 }
 
 tasks.jar {

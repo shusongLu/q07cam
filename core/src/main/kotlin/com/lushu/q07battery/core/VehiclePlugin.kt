@@ -7,7 +7,7 @@ import android.content.Context
  * 壳与插件必须一致，否则拒绝加载（避免接口不匹配导致崩溃）。
  * 只要不改这个接口，插件就能无限次热更，无需重装 App。
  */
-const val PLUGIN_INTERFACE_VERSION: Int = 1
+const val PLUGIN_INTERFACE_VERSION: Int = 2
 
 /** 插件入口类的全限定名（壳按此名字反射实例化）。 */
 const val PLUGIN_ENTRY_CLASS: String = "com.lushu.plugin.DefaultVehiclePlugin"

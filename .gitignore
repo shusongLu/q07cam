@@ -15,5 +15,7 @@ captures/
 shots/
 tools/out/
 recon/recon-out/
+recon/apks-manual/
+recon/libs/
 *.apk
 *.dex

@@ -15,6 +15,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.WindowManager
 import android.widget.TextView
+import com.lushu.q07battery.core.Gear
 import com.lushu.q07battery.core.TurnSignal
 import com.lushu.q07battery.core.VehicleSignals
 
@@ -104,8 +105,8 @@ class OverlayService : Service() {
 
     private fun render(s: VehicleSignals) {
         tvPower?.text = "%.1f kW".format(s.batteryPowerKw)
-        tvRpm?.text = if (s.engineRunning) "${s.engineRpm} rpm" else "EV"
-        tvSoc?.text = "SOC %.0f%%  %.0f V  %.0f A".format(s.socPercent, s.batteryVoltageV, s.batteryCurrentA)
+        tvRpm?.text = "%s  %.0f km/h".format(Gear.label(s.gear), s.speedKph)
+        tvSoc?.text = "电量 %.0f%%  续航 %.0f km".format(s.socPercent, s.rangeKm)
         turnView?.visibility = if (s.turnSignal == TurnSignal.OFF) View.GONE else View.VISIBLE
     }
 

@@ -1,6 +1,8 @@
 package com.lushu.q07battery
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import com.lushu.q07battery.core.PLUGIN_ENTRY_CLASS
 import com.lushu.q07battery.core.PLUGIN_FILE_NAME
@@ -24,6 +26,12 @@ import java.util.concurrent.CopyOnWriteArrayList
 object PluginRuntime {
 
     private const val TAG = "PluginRuntime"
+
+    /**
+     * 插件在工作线程采样（Car.createCar 必须避开主线程），
+     * 所有对外回调统一切回主线程 —— UI 只能在主线程刷新。
+     */
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private var plugin: VehiclePlugin? = null
     private var loader: DexClassLoader? = null
@@ -129,12 +137,12 @@ object PluginRuntime {
         override val appContext: Context get() = appContext
 
         override fun emit(signals: VehicleSignals) {
-            signalListeners.forEach { it(signals) }
+            mainHandler.post { signalListeners.forEach { it(signals) } }
         }
 
         override fun status(text: String) {
             statusText = text
-            publishStatus()
+            mainHandler.post { publishStatus() }
         }
 
         override fun log(message: String) {

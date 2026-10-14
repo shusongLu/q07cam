@@ -165,3 +165,55 @@ powershell -ExecutionPolicy Bypass -File .\adbrecon.ps1 -Connect <IP:端口> -Tu
 1. **车连上** → `adbrecon.ps1` 侦察 → 判定信号来源（广播 / AIDL / AAOS CarPropertyManager）
 2. 按结果改 **plugin**（不用动壳、不用重装），`build-plugin-dex.ps1 -Push` 验证
 3. 数据通了再逐步做多屏与转向联动
+
+---
+
+## 九、实车侦察结论（已在 Q07 上跑通）
+
+### 车机身份
+
+| 项 | 值 |
+|---|---|
+| 系统 | Android 11 (API 30)，`user` build |
+| 平台 | SiEngine **SE1000**（`SiEngine/se1000_car/se1000:11/RD2A.211001.002/27`）|
+| 车辆架构 | **AAOS**：`car_service`、厂商车辆属性 HAL `com.ca.car.proxy.hardware.property.ICarProperty` |
+| SELinux / 调试 | **Permissive**；`ro.debuggable=1` → `adb root` 可用（但**产品不需要 root**）|
+| 屏幕 | port 0 = 中控 2560×1600；port 2 = 副驾 1920×1080（两块真屏）；port 3 (800×480) / port 10 (243×200) 全黑（疑似 HUD / 预留口）|
+
+> 注：`screencap -d` 用的是**物理口编号**，不是 `dumpsys display` 的逻辑 ID。
+
+### 车辆属性（CarPropertyManager，VHAL 共暴露 82 个）
+
+| 功能 | 属性 | ID | 所需权限 | 保护级别 | 普通 App |
+|---|---|---|---|---|---|
+| **实时功率** | `EV_BATTERY_INSTANTANEOUS_CHARGE_RATE` | `0x1160030C` | `CAR_ENERGY` | **dangerous** | ✅ |
+| 电量 / 续航 / 油量 | `EV_BATTERY_LEVEL` / `RANGE_REMAINING` / `FUEL_LEVEL` | `0x11600309 / 0x11600308 / 0x11600307` | `CAR_ENERGY` | dangerous | ✅ |
+| 车速 | `PERF_VEHICLE_SPEED` | `0x11600207` | `CAR_SPEED` | dangerous | ✅ |
+| 挡位 / 点火 / 手刹 | `GEAR_SELECTION` / `IGNITION_STATE` / `PARKING_BRAKE_ON` | `0x11400400 / 0x11400409 / 0x11200402` | `CAR_POWERTRAIN` | **normal** | ✅ |
+| **发动机转速** | `ENGINE_RPM` | `0x11600305` | `CAR_ENGINE_DETAILED` | signature\|privileged | ❌ |
+| **转向灯** | `TURN_SIGNAL_STATE` | `0x11400408` | `CAR_EXTERIOR_LIGHTS` | signature\|privileged | ❌ |
+
+- `ICarProperty.getReadPermission(id)` 可查任意属性所需权限（探针见下）。
+- 厂商的车辆数据服务（`hmiservice` / `sdkservice` / `SoaBridgeTransit`）全部 `sharedUserId="android.uid.system"`，**不对外开放**；三方接入靠 SDA 开发者平台（`open.sda.changan.com.cn`，其"虚拟车模块"为仿真数据，需审核）。
+
+### 安装限制（重要）
+
+`adb install` / `pm install` / 分段安装 / 冒充市场安装器 **全部失败**：
+
+```
+INSTALL_FAILED_INVALID_APK: CAKJ failed to verify APK result
+```
+
+- 日志 tag `Leosin-APK`，来自 **system_server**；字符串 `CAKJ` 位于 `/system/framework/services.jar`
+- 即厂商在**框架层**加了安装校验钩子 —— 不是可 `pm disable` 的 App，也没有对应设置项
+- 手动放 `/data/app` 也不行：PMS 开机扫描会把 `packages.xml` 里没有的目录当孤儿删除
+
+**结论：装壳必须走官方 / 内测分发渠道；壳装好后插件照常热更。**
+
+### 单位待标定
+
+`EV_BATTERY_LEVEL` / `RANGE_REMAINING` / `FUEL_LEVEL` 厂商未提供 min/max（null），
+原始值（驻车实测 150000 / 50000 / 15000）需实车对比标定。
+系数集中在 `plugin/src/main/kotlin/com/lushu/plugin/DefaultVehiclePlugin.kt` 的 `companion object`，
+界面底部会显示原始值，便于一眼对照修正。
+

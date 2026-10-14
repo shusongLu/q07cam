@@ -60,6 +60,15 @@
             android:textColor="#FF729FCF"
             android:textSize="18sp" />
 
+        <TextView
+            android:id="@+id/tvRaw"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:fontFamily="monospace"
+            android:textColor="#66FFFFFF"
+            android:textSize="11sp" />
+
         <View
             android:layout_width="match_parent"
             android:layout_height="1dp"
