@@ -1,60 +1,67 @@
 package q07overlay;
 
 import android.content.Context;
-import android.graphics.Color;
 import android.graphics.PixelFormat;
+import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.RelativeSizeSpan;
+import android.text.style.StyleSpan;
 import android.view.Gravity;
 import android.view.WindowManager;
-import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.lang.reflect.Method;
+import java.util.Locale;
 
 /**
- * Q07 实时功率悬浮窗（不安装版）。
+ * Q07 实时数据悬浮窗（不安装、不改 /system 版）。
  *
- * 车辆信号：厂商 HAL —— com.ca.car.proxy.hardware.property.CaCarPropertyManager
- *           （车机 BOOTCLASSPATH 自带，无需任何权限、无需 root 权限声明）
- * 转向灯  ：AOSP CarProperty 拿不到（转向灯走厂商 SOA 通道），退而求其次从 logcat
- *           读 SOA 通知 Basc_ExtrLiInfoTips.Ntf_TurnLiInfo，并用"保持窗口"消除闪烁。
+ * 数据来源：厂商 SOA HIDL —— android.hardware.automotive.soabridge.V1_0.ISoaBridgeNative
+ *           （车机 /system/app/SoaBridgeTransit 里的 Java 类，dex 挂到 CLASSPATH 即可）
  *
- * 由 root 通过 app_process 启动（见 tools/run-overlay.ps1），不安装、不改 /system。
+ * id 全部逆向自厂商自己的适配层 com.incall.soabridgeadapter.*ClientEmbedded，
+ * 字段下标抄自 com.changan.evs.appservice 的 com.incall.apps.common.manager.SoaBridgeManager。
+ * 详见 recon/soa-signal-map.md。
+ *
+ * 转向灯：SOA 通知走 logcat（Basc_ExtrLiInfoTips.Ntf_TurnLiInfo），用"保持窗口"消抖。
+ *
+ * 注意：app_process 下窗口尺寸不会随内容重算，所以用固定尺寸 + 单个 TextView
+ *      （多子视图时后加的几行不参与绘制）。
  */
 public class Main {
 
-    private static TextView tvPower;
-    private static TextView tvRpm;
-    private static TextView tvInfo1;
-    private static TextView tvInfo2;
-    private static TextView tvRaw;
+    // ---------------------------------------------------------------- 信号 id
+    private static final int ID_VEH_SPD      = 0x00418006; // 车速             int[]
+    private static final int ID_GEAR_POSN    = 0x00418037; // 挡位 [0]=挡位 [1]=无效
+    private static final int ID_POWER_SHIFT  = 0x00408004; // 电源挡位 0OFF 1ACC 2ON 3START
+    private static final int ID_PT_LAMP      = 0x00419788; // 仪表文字显示      [25]=SOC 电量%
+    private static final int ID_BCU_OPER_PRM = 0x00419307; // BCU 电池控制单元  [12]=高压电压 V
+    private static final int ID_PDU_OPER_PRM = 0x00419309; // PDU 高压配电单元  [8][13]=母线电压 [0]=电流
+    private static final int ID_RESI_MILG    = 0x00412055; // 剩余里程
+    private static final int ID_TOTAL_MILG   = 0x00501000; // 总里程
+    private static final int ID_REEV_OPER    = 0x00413072; // 增程器运行参数
+    private static final int ID_EGY_CNSE     = 0x00412050; // 整车能耗信息
 
-    // ---------- 属性 ID（与厂商 defs.VehicleProperty 一致）----------
-    private static final int ID_ENGINE_RPM = 0x11600305;
-    private static final int ID_EV_CHARGE_RATE = 0x1160030C;
-    private static final int ID_EV_BATTERY_LEVEL = 0x11600309;
-    private static final int ID_RANGE_REMAINING = 0x11600308;
-    private static final int ID_FUEL_LEVEL = 0x11600307;
-    private static final int ID_PERF_SPEED = 0x11600207;
-    private static final int ID_GEAR_SELECTION = 0x11400400;
-
-    // ---------- 标定系数 ----------
-    /** 实测：原始值 150000 ↔ 车上 50%，故 1% = 3000。 */
-    private static final float SOC_DIVISOR = 3000f;
-    /** RANGE_REMAINING 原始单位按 m（50000 → 50 km）。 */
-    private static final float RANGE_DIVISOR = 1000f;
-    private static final float FUEL_DIVISOR = 1000f;
-    /** EV_BATTERY_INSTANTANEOUS_CHARGE_RATE 原始单位 W。 */
-    private static final float POWER_W_TO_KW = 0.001f;
+    /** PDU[0] 的量纲待标定：暂按 0.1 A，功率 = 母线电压 × 该电流。 */
+    private static final float PDU_CURRENT_SCALE = 0.1f;
 
     /** 转向灯"保持"窗口：闪烁间隔约 720ms，2.5s 内没再收到就认为已关。 */
     private static final long TURN_HOLD_MS = 2500L;
 
-    private static volatile long lastLeftTurnAt = 0L;
-    private static volatile long lastRightTurnAt = 0L;
+    private static TextView tvMain;
+
+    private static volatile float kwPdu, pduVolt, pduCur, hvVolt, socPct, rangeKm, totalKm, speed;
+    private static volatile float[] reev = new float[7];
+    private static volatile int[] egyCnse = new int[5];
+    private static volatile int gear = -1, gearInvalid = -1, powerShift = -1, pduRaw0 = -1, pduRaw22 = -1, pduRaw8 = -1;
+
+    private static volatile long lastLeftTurnAt = 0L, lastRightTurnAt = 0L, lastLogAt = 0L;
 
     public static void main(String[] args) {
         try {
@@ -62,61 +69,48 @@ public class Main {
             Class<?> at = Class.forName("android.app.ActivityThread");
             Object thread = at.getMethod("systemMain").invoke(null);
             Context base = (Context) at.getMethod("getSystemContext").invoke(thread);
-            // system 的 Context 没有主题，直接建 TextView 会在初始化默认字体时崩，套个主题
             Context ctx = new android.view.ContextThemeWrapper(base, android.R.style.Theme_DeviceDefault);
 
-            final Handler main = new Handler(Looper.getMainLooper());
-
-            tvPower = label(ctx, 64f, 0xFF8AE234);
-            tvRpm = label(ctx, 34f, 0xFFFCE94F);
-            tvInfo1 = label(ctx, 24f, 0xFFB9C2CC);
-            tvInfo2 = label(ctx, 24f, 0xFFB9C2CC);
-            tvRaw = label(ctx, 14f, 0x66FFFFFF);
-
-            LinearLayout root = new LinearLayout(ctx);
-            root.setOrientation(LinearLayout.VERTICAL);
-            root.setBackgroundColor(0xCC0A0E12);
-            root.setPadding(48, 32, 48, 32);
-            root.addView(tvPower);
-            root.addView(tvRpm);
-            root.addView(tvInfo1);
-            root.addView(tvInfo2);
-            root.addView(tvRaw);
+            tvMain = new TextView(ctx);
+            tvMain.setTextSize(30f);
+            tvMain.setTextColor(0xFFE6EDF3);
+            tvMain.setSingleLine(false);
+            tvMain.setBackgroundColor(0xE60A0E12);
+            tvMain.setPadding(44, 26, 44, 26);
 
             WindowManager wm = (WindowManager) base.getSystemService(Context.WINDOW_SERVICE);
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.WRAP_CONTENT,
-                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    1040, 560,
                     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                             | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                             | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                     PixelFormat.TRANSLUCENT);
+            // 中控首页左侧是"卡片栏"，放那儿会被自家卡片挡；挪到右边空白区
             lp.gravity = Gravity.TOP | Gravity.START;
-            lp.x = 60;
-            lp.y = 60;
-            wm.addView(root, lp);
+            lp.x = 470;
+            lp.y = 170;
+            wm.addView(tvMain, lp);
             System.out.println("[ovl] window added");
 
-            // 厂商 HAL：必须在**带 Looper 的线程**上初始化并订阅；回调靠 Handler 投递，
-            // 所以主线程要跑 Looper.loop()（下面就是）
-            pollVehicle(main);
+            if (!initSoa()) {
+                tvMain.setText("SOA 未连接（检查 CLASSPATH 是否含 sdk*.dex / soa*.dex）");
+            }
+
+            final Handler main = new Handler(Looper.getMainLooper());
+            main.postDelayed(new Runnable() {
+                @Override public void run() {
+                    poll();
+                    render();
+                    main.postDelayed(this, 300L);
+                }
+            }, 100L);
 
             Thread turn = new Thread(new Runnable() {
                 @Override public void run() { watchTurnSignal(); }
             }, "q07-turn");
             turn.setDaemon(true);
             turn.start();
-
-            // 转向灯靠"时间窗口"算出来的，需要周期性重绘
-            final Handler ticker = new Handler(Looper.getMainLooper());
-            ticker.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    render();
-                    ticker.postDelayed(this, 500L);
-                }
-            }, 500L);
 
             System.out.println("[ovl] entering loop");
             Looper.loop();
@@ -125,129 +119,141 @@ public class Main {
         }
     }
 
-    private static TextView label(Context ctx, float sp, int color) {
-        TextView tv = new TextView(ctx);
-        tv.setTextSize(sp);
-        tv.setTextColor(color);
-        tv.setSingleLine(true);
-        return tv;
-    }
+    // ---------------------------------------------------------------- SOA
 
-    // ---------- 车辆信号轮询 ----------
+    private static Object soaClient;
+    private static Method mGetProperty, mGetValue;
 
-    private static void pollVehicle(Handler main) {
-        // 注意：厂商 HAL 的 getProperty 返回的是**陈旧缓存**，实时值只能靠订阅事件。
-        // 订阅回调通过 Handler 投递，因此主线程必须跑 Looper.loop()（main() 里已经在跑）。
+    private static boolean initSoa() {
         try {
-            Class<?> mgrCls = Class.forName("com.ca.car.proxy.hardware.property.CaCarPropertyManager");
-            final Object mgr = mgrCls.getMethod("getInstance").invoke(null);
-            final Method register = mgrCls.getMethod("registerServiceListener", int.class, float.class,
-                    Class.forName("com.ca.car.proxy.hardware.property.CaCarPropertyCallback$ICarPropertyOnEventListener"));
-
-            Class<?> listenerCls = Class.forName("com.ca.car.proxy.hardware.property.CaCarPropertyCallback$ICarPropertyOnEventListener");
-            Object listener = java.lang.reflect.Proxy.newProxyInstance(
-                    Main.class.getClassLoader(), new Class<?>[]{listenerCls},
-                    new java.lang.reflect.InvocationHandler() {
-                        @Override
-                        public Object invoke(Object proxy, Method method, Object[] args) {
-                            String n = method.getName();
-                            if (n.equals("onChangeEvent") && args != null && args.length == 1 && args[0] != null) {
-                                onPropertyEvent(args[0]);
-                            } else if (n.equals("toString")) {
-                                return "q07-listener";
-                            } else if (n.equals("hashCode")) {
-                                return System.identityHashCode(proxy);
-                            } else if (n.equals("equals")) {
-                                return proxy == args[0];
-                            }
-                            return null;
-                        }
-                    });
-
-            int[] ids = {ID_EV_CHARGE_RATE, ID_ENGINE_RPM, ID_EV_BATTERY_LEVEL,
-                    ID_RANGE_REMAINING, ID_FUEL_LEVEL, ID_PERF_SPEED, ID_GEAR_SELECTION};
-            for (int id : ids) {
-                try {
-                    register.invoke(mgr, id, 0.0f, listener);
-                } catch (Throwable t) {
-                    System.out.println("[ovl] subscribe 0x" + Integer.toHexString(id) + " failed: " + t);
-                }
-            }
-            System.out.println("[ovl] subscribed " + ids.length + " properties (event-driven)");
-
-            // 厂商只在「值变化」时推送，所以先用一次 getProperty 把初值播种进去，
-            // 之后一律以事件为准（getProperty 的缓存可能长期陈旧）。
-            try {
-                Method getProperty = mgrCls.getMethod("getProperty", int.class, int.class);
-                Method getValue = Class.forName("com.ca.car.proxy.hardware.CarPropertyValue").getMethod("getValue");
-                for (int id : ids) {
-                    try {
-                        Object v = getProperty.invoke(mgr, id, 0);
-                        if (v == null) continue;
-                        Object val = getValue.invoke(v);
-                        if (val instanceof Number) applyValue(id, ((Number) val).floatValue());
-                    } catch (Throwable ignored) {
-                    }
-                }
-                System.out.println("[ovl] seeded initial values");
-                main.post(new Runnable() {
-                    @Override public void run() { render(); }
-                });
-            } catch (Throwable ignored) {
-            }
+            Class<?> iface = Class.forName("android.hardware.automotive.soabridge.V1_0.ISoaBridgeNative");
+            Object svc = iface.getMethod("getService").invoke(null);
+            Class<?> clientCls = Class.forName(
+                    "com.incall.soabridge.impl.SoaBridgeServiceManagement.SoaBridgeNativeClient");
+            soaClient = clientCls.getConstructor(iface).newInstance(svc);
+            mGetProperty = clientCls.getMethod("getProperty", int.class);
+            mGetValue = Class.forName("com.incall.soabridge.bean.SoaClientProperty")
+                    .getMethod("getPropertyValue");
+            System.out.println("[ovl] SOA connected: " + soaClient);
+            return true;
         } catch (Throwable t) {
-            System.out.println("[ovl] vendor HAL init failed: " + t);
-            main.post(new Runnable() {
-                @Override public void run() { tvInfo1.setText("车辆服务连接失败"); }
-            });
+            System.out.println("[ovl] SOA init failed: " + t);
+            return false;
         }
     }
 
-    // ---------- 事件处理（主线程；值来自推送，不要用 getProperty 的陈旧缓存） ----------
-
-    private static volatile float vPowerW, vLevel, vRange, vFuel, vSpeed, vRpm;
-    private static volatile int vGear = -1;
-    private static volatile boolean dirty = true;
-
-    private static void onPropertyEvent(Object carPropertyValue) {
+    /** 读一个属性并转成 int[]；读不到返回 null。 */
+    private static int[] read(int id) {
         try {
-            int id = (Integer) carPropertyValue.getClass().getMethod("getPropertyId").invoke(carPropertyValue);
-            Object v = carPropertyValue.getClass().getMethod("getValue").invoke(carPropertyValue);
-            if (v instanceof Number) applyValue(id, ((Number) v).floatValue());
+            Object prop = mGetProperty.invoke(soaClient, id);
+            if (prop == null) return null;
+            Object v = mGetValue.invoke(prop);
+            if (v == null) return null;
+            if (v instanceof int[]) return (int[]) v;
+            if (v instanceof Object[]) {
+                Object[] a = (Object[]) v;
+                int[] r = new int[a.length];
+                for (int i = 0; i < a.length; i++) r[i] = a[i] instanceof Number ? ((Number) a[i]).intValue() : 0;
+                return r;
+            }
+            if (v instanceof Number) return new int[]{((Number) v).intValue()};
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static void poll() {
+        try {
+            int[] a;
+            if ((a = read(ID_GEAR_POSN)) != null && a.length >= 2) { gear = a[0]; gearInvalid = a[1]; }
+            if ((a = read(ID_VEH_SPD)) != null && a.length >= 1) { speed = a[0]; }
+            if ((a = read(ID_POWER_SHIFT)) != null && a.length >= 1) { powerShift = a[0]; }
+            if ((a = read(ID_RESI_MILG)) != null && a.length >= 1) { rangeKm = a[0]; }
+            if ((a = read(ID_TOTAL_MILG)) != null && a.length >= 1) { totalKm = a[0]; }
+            if ((a = read(ID_BCU_OPER_PRM)) != null && a.length > 12) { hvVolt = a[12]; }
+            if ((a = read(ID_PT_LAMP)) != null && a.length > 25) { socPct = a[25]; }
+            if ((a = read(ID_PDU_OPER_PRM)) != null && a.length > 22) {
+                pduRaw0 = a[0]; pduRaw8 = a[8]; pduRaw22 = a[22];
+                pduVolt = a[8] / 10f;
+                pduCur = a[0] * PDU_CURRENT_SCALE;
+                kwPdu = pduVolt > 0 ? pduVolt * pduCur / 1000f : 0f;
+            }
+            if ((a = read(ID_REEV_OPER)) != null) {
+                for (int i = 0; i < reev.length && i < a.length; i++) reev[i] = a[i];
+            }
+            if ((a = read(ID_EGY_CNSE)) != null) {
+                for (int i = 0; i < egyCnse.length && i < a.length; i++) egyCnse[i] = a[i];
+            }
         } catch (Throwable ignored) {
         }
     }
 
-    /** 事件与播种共用：只更新我们关心的 7 个。 */
-    private static void applyValue(int id, float f) {
-        switch (id) {
-            case ID_EV_CHARGE_RATE: vPowerW = f; break;
-            case ID_ENGINE_RPM: vRpm = f; break;
-            case ID_EV_BATTERY_LEVEL: vLevel = f; break;
-            case ID_RANGE_REMAINING: vRange = f; break;
-            case ID_FUEL_LEVEL: vFuel = f; break;
-            case ID_PERF_SPEED: vSpeed = f; break;
-            case ID_GEAR_SELECTION: vGear = (int) f; break;
-            default: return;
-        }
-        dirty = true;
-    }
+    // ---------------------------------------------------------------- 渲染
 
     private static void render() {
-        final float powerW = vPowerW, level = vLevel, range = vRange, fuel = vFuel, speed = vSpeed, rpm = vRpm;
-        final int gear = vGear;
-        final String turn = turnText();
-        tvPower.setText(String.format("%.1f kW", powerW * POWER_W_TO_KW));
-        tvRpm.setText(rpm > 0f ? String.format("%d rpm", (int) rpm) : "EV（增程器未启动）");
-        tvInfo1.setText(String.format("电量 %.0f%%    续航 %.0f km    油 %.0f%%",
-                level / SOC_DIVISOR, range / RANGE_DIVISOR, fuel / FUEL_DIVISOR));
-        tvInfo2.setText(String.format("车速 %.0f km/h    挡位 %s    转向 %s",
-                speed, gearName(gear), turn));
-        tvRaw.setText(String.format("lvl=%.0f rng=%.0f fuel=%.0f pwr=%.0f spd=%.0f rpm=%.0f gear=%d turn=%s",
-                level, range, fuel, powerW, speed, rpm, gear, turn));
+        final int turn = turnState();  // 0 关 1 左 2 右 3 双闪
+
+        SpannableStringBuilder sb = new SpannableStringBuilder();
+        append(sb, String.format(Locale.US, "%.1f kW", kwPdu),
+                2.6f, 0xFF8AE234, true);
+        append(sb, String.format(Locale.US, "\nPDU %.1fV × %.1fA（系数待标定）   ·   高压 %.0fV",
+                pduVolt, pduCur, hvVolt), 0.8f, 0xFF9ACD32, false);
+        append(sb, String.format(Locale.US, "\n电量 %.0f%%   ·   续航 %.0f km   ·   总里程 %.0f km",
+                socPct, rangeKm, totalKm), 1f, 0xFFE6EDF3, false);
+        append(sb, String.format(Locale.US, "\n挡位 %s   ·   %.0f km/h   ·   电源 %s   ·   转向 %s",
+                gearName(gear, gearInvalid), speed, powerShiftName(powerShift), turnName(turn)),
+                1f, 0xFFE6EDF3, false);
+        append(sb, String.format(Locale.US,
+                "\nPDU[0]=%d [8]=%d [22]=%d  ·  BCU[12]=%.0fV  ·  PtLamp[25]=%.0f\nREEV=%d/%d/%d/%d  ·  EGY=%d/%d/%d/%d/%d",
+                pduRaw0, pduRaw8, pduRaw22, hvVolt, socPct,
+                (int) reev[0], (int) reev[1], (int) reev[2], (int) reev[6],
+                egyCnse[0], egyCnse[1], egyCnse[2], egyCnse[3], egyCnse[4]), 0.52f, 0x99FFFFFF, false);
+
+        tvMain.setText(sb);
+
+        long now = System.currentTimeMillis();
+        if (now - lastLogAt > 2000L) {
+            lastLogAt = now;
+            System.out.println(String.format(Locale.US,
+                    "[data] kw=%.1f pduV=%.1f pduI=%.1f hv=%.0f soc=%.0f range=%.0f odo=%.0f gear=%s spd=%.0f pwr=%s turn=%s reev=%d/%d",
+                    kwPdu, pduVolt, pduCur, hvVolt, socPct, rangeKm, totalKm,
+                    gearName(gear, gearInvalid), speed, powerShiftName(powerShift), turnName(turn),
+                    (int) reev[0], (int) reev[1]));
+        }
     }
 
-    // ---------- 转向灯（厂商 SOA 通知，从 logcat 读） ----------
+    private static void append(SpannableStringBuilder sb, String text, float scale, int color, boolean bold) {
+        int start = sb.length();
+        sb.append(text);
+        int end = sb.length();
+        if (scale != 1f) sb.setSpan(new RelativeSizeSpan(scale), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        sb.setSpan(new ForegroundColorSpan(color), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        if (bold) sb.setSpan(new StyleSpan(Typeface.BOLD), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+    }
+
+    /** 厂商常量：GEAR_P=1, GEAR_R=2, GEAR_N=3, GEAR_D=4。 */
+    private static String gearName(int g, int invalid) {
+        if (invalid != 0) return "?";
+        switch (g) {
+            case 1: return "P";
+            case 2: return "R";
+            case 3: return "N";
+            case 4: return "D";
+            default: return String.valueOf(g);
+        }
+    }
+
+    private static String powerShiftName(int p) {
+        switch (p) {
+            case 0: return "OFF";
+            case 1: return "ACC";
+            case 2: return "ON";
+            case 3: return "START";
+            default: return "--";
+        }
+    }
+
+    // ---------------------------------------------------------------- 转向灯（logcat）
 
     private static void watchTurnSignal() {
         Process p = null;
@@ -258,17 +264,14 @@ public class Main {
             System.out.println("[ovl] logcat watcher started");
             String line;
             while ((line = r.readLine()) != null) {
-                int nameAt = line.indexOf("Ntf_TurnLiInfo");
-                if (nameAt < 0) continue;
+                if (line.indexOf("Ntf_TurnLiInfo") < 0) continue;
                 int valAt = line.indexOf("Value:");
                 if (valAt < 0) continue;
                 String[] parts = line.substring(valAt + 6).trim().split("\\s+");
                 if (parts.length < 2) continue;
-                boolean left = "1".equals(parts[0]);
-                boolean right = "1".equals(parts[1]);
                 long now = System.currentTimeMillis();
-                if (left) lastLeftTurnAt = now;
-                if (right) lastRightTurnAt = now;
+                if ("1".equals(parts[0])) lastLeftTurnAt = now;
+                if ("1".equals(parts[1])) lastRightTurnAt = now;
             }
         } catch (Throwable t) {
             System.out.println("[ovl] logcat watcher failed: " + t);
@@ -278,28 +281,22 @@ public class Main {
         }
     }
 
-    private static String turnText() {
+    private static int turnState() {
         long now = System.currentTimeMillis();
         boolean left = now - lastLeftTurnAt < TURN_HOLD_MS;
         boolean right = now - lastRightTurnAt < TURN_HOLD_MS;
-        if (left && right) return "双闪";
-        if (left) return "左";
-        if (right) return "右";
-        return "关";
+        if (left && right) return 3;
+        if (left) return 1;
+        if (right) return 2;
+        return 0;
     }
 
-    private static String gearName(int g) {
-        switch (g) {
-            case 1: return "N";
-            case 2: return "R";
-            case 4: return "P";
-            case 8: return "D";
-            case 16: return "1";
-            case 32: return "2";
-            case 64: return "3";
-            case 128: return "4";
-            case 256: return "5";
-            default: return String.valueOf(g);
+    private static String turnName(int t) {
+        switch (t) {
+            case 1: return "◀ 左";
+            case 2: return "右 ▶";
+            case 3: return "双闪";
+            default: return "关";
         }
     }
 }

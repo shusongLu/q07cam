@@ -62,9 +62,34 @@ $dex = "/data/local/tmp/q07overlay.dex"
 $exists = Invoke-Adb @("shell", "ls -l $dex")
 if ($exists -match "No such") { throw "车上没有 $dex，先跑 tools\build-overlay.ps1 -Push" }
 
+# 厂商 SOA 依赖的 dex（从车上 APK 里抽出来的），需要一起挂到 CLASSPATH
+$repo = Split-Path $PSScriptRoot -Parent
+$depDirs = @(
+    @{ Dir = Join-Path $repo "recon\libs\sdk";       Prefix = "sdk"; Count = 5  },
+    @{ Dir = Join-Path $repo "recon\libs\soabridge"; Prefix = "soa"; Count = 12 }
+)
+$cp = $dex
+foreach ($d in $depDirs) {
+    for ($i = 1; $i -le $d.Count; $i++) {
+        $name = "$($d.Prefix)$i.dex"
+        $devPath = "/data/local/tmp/$name"
+        $onDevice = Invoke-Adb @("shell", "ls $devPath 2>/dev/null")
+        if ($onDevice -notmatch "\.dex") {
+            $local = Join-Path $d.Dir $name
+            if (Test-Path $local) {
+                Write-Host "  推送依赖 $name …" -ForegroundColor DarkGray
+                Invoke-Adb @("push", $local, $devPath) | Out-Null
+            } else {
+                Write-Host "  ⚠ 缺少依赖 $local" -ForegroundColor Red
+            }
+        }
+        $cp += ":$devPath"
+    }
+}
+
 Write-Host "启动悬浮窗 …" -ForegroundColor Cyan
 Invoke-Adb @("shell", "rm -f /data/local/tmp/q07overlay.log") | Out-Null
-Invoke-Adb @("shell", "CLASSPATH=$dex app_process /system/bin q07overlay.Main > /data/local/tmp/q07overlay.log 2>&1 &") | Out-Null
+Invoke-Adb @("shell", "CLASSPATH=$cp app_process /system/bin q07overlay.Main > /data/local/tmp/q07overlay.log 2>&1 &") | Out-Null
 Start-Sleep -Seconds 5
 
 Write-Host "--- 日志 ---" -ForegroundColor DarkGray

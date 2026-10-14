@@ -132,10 +132,11 @@ public int getGear_Get() {
 }
 // 常量：GEAR_P=1, GEAR_R=2, GEAR_N=3, GEAR_D=4（另有 GEAR_INVALID / GEAR_RESERVED）
 
-// 电池功率
+// 电量 SOC（厂商代码里方法名叫 getBatteryPower 其实起歪了，
+// 调用它的是 updateBcuSocState，值就是仪表上的电量百分比）
 public int getBatteryPower_Get() {
     int[] p = vehicleInfoClientManager.getPtLampTextDispInfo();  // 0x00419788
-    return Math.max(p[25], 0);                                   // ← [25] = 电池功率
+    return Math.max(p[25], 0);                                   // ← [25] = SOC 电量%
 }
 
 // 高压电压
@@ -145,7 +146,9 @@ public int getChargeHighV_Get() {
 }
 ```
 
-**实测验证**：`BcuOperPrmInfo[12] = 374`，正是 374 V ✓
+**实测验证**：
+- `BcuOperPrmInfo[12] = 374` → 374 V ✓
+- `PtLampTextDispInfo[25] = 47` ↔ 车机状态栏同时显示 **47%** ✓ （SOC 板上钉钉）
 
 ---
 
