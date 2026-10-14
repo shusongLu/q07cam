@@ -24,8 +24,6 @@ import android.view.SurfaceView;
 import android.view.WindowManager;
 import android.widget.TextView;
 
-import com.incall.camedia.CaMediaPlayer;
-
 import java.util.Locale;
 
 /**
@@ -64,8 +62,8 @@ public class OverlayService extends Service {
     private static final int CAM_W = 720, CAM_H = 405, CAM_X = 470, CAM_Y = 745;
     private static final String RTSP_LEFT = "rtsp://172.16.6.26:8888/lt";
     private static final String RTSP_RIGHT = "rtsp://172.16.6.26:8888/rt";
-    /** 换边时的间隔：等旧 RTSP 会话释放（厂商 AVM 也是这么做的）。 */
-    private static final long SWITCH_DELAY_MS = 250L;
+    /** 换边时的间隔：自研播放器 stop() 已发 TEARDOWN，只需很短间隔。 */
+    private static final long SWITCH_DELAY_MS = 80L;
 
     public static volatile boolean running = false;
     /** 服务活着才继续跑轮询线程（否则 stopService/startService 会泄漏线程）。 */
@@ -108,7 +106,7 @@ public class OverlayService extends Service {
 
     private static class CamSide {
         SurfaceView view;
-        CaMediaPlayer player;
+        Q07RtspPlayer player;
         Surface surface;
         String url;
         boolean onScreen;
@@ -491,14 +489,11 @@ public class OverlayService extends Service {
         if (s.player != null || s.surface == null || s.url == null) return;
         try {
             if (s.view == null) ensureSide(idx, (preMask & (1 << idx)) != 0);
-            CaMediaPlayer p = new CaMediaPlayer();
-            int r1 = p.setDataSource(s.url);
-            int r2 = p.setSurface(s.surface);
-            int r3 = p.play(s.surface);
+            Q07RtspPlayer p = new Q07RtspPlayer(s.url);
+            p.start(s.surface);
             s.player = p;
             long ms = System.currentTimeMillis() - turnSignalAt;
-            Log.i(TAG, "[cam] " + s.url + " setDataSource=" + r1 + " setSurface=" + r2 + " play=" + r3
-                    + "   信号->开始播放 " + ms + "ms");
+            Log.i(TAG, "[cam] " + s.url + " 自研播放器已启动   信号->起播 " + ms + "ms");
         } catch (Throwable t) {
             Log.e(TAG, "[cam] startSide 失败: " + t);
             s.player = null;
@@ -508,8 +503,9 @@ public class OverlayService extends Service {
     private void stopPlayer(int idx) {
         CamSide s = sides[idx];
         if (s.player != null) {
-            try { s.player.close(); } catch (Throwable ignored) {}
-            try { s.player.release(); } catch (Throwable ignored) {}
+            // 自研播放器会在 stop() 里显式发 TEARDOWN，
+            // 让服务端立刻释放那把唯一的发送口（厂商播放器做不到这点）
+            try { s.player.stop(); } catch (Throwable ignored) {}
             s.player = null;
         }
     }

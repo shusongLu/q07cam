@@ -1,5 +1,4 @@
 import java.util.Properties
-import java.util.zip.ZipFile
 
 plugins {
     id("com.android.application")
@@ -31,8 +30,8 @@ android {
         applicationId = "de.dsa.ford.otaflash"
         minSdk = 30
         targetSdk = 30
-        versionCode = 17
-        versionName = "1.6"
+        versionCode = 18
+        versionName = "2.0"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -80,32 +79,13 @@ android {
     }
 }
 
-// ---------------------------------------------------------------- 第三方厂商文件
-// 1) 厂商 HIDL Java 类（recon/libs/soabridge/*.dex）
+// ---------------------------------------------------------------- 厂商文件
+// 厂商 HIDL Java 类（recon/libs/soabridge/*.dex），构建时从 recon 拷贝
 val copyVendorDex = tasks.register<Copy>("copyVendorDex") {
     from(rootProject.file("recon/libs/soabridge")) { include("*.dex") }
     into(layout.projectDirectory.dir("src/main/assets"))
 }
 
-// 2) 厂商 FFmpeg 播放器（侧摄像头 H.265 RTSP），从 CaEvsAppService.apk 里抽
-val extractFfmpeg = tasks.register("extractFfmpeg") {
-    val apkFile = rootProject.file("recon/apks-manual/com.changan.evs.appservice/base.apk")
-    val outDir = layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a").asFile
-    inputs.file(apkFile)
-    outputs.dir(outDir)
-    doLast {
-        val so = File(outDir, "libffmpeg.so")
-        if (so.exists() && so.length() > 0) return@doLast
-        outDir.mkdirs()
-        ZipFile(apkFile).use { z ->
-            val e = z.getEntry("lib/arm64-v8a/libffmpeg.so")
-                ?: error("APK 里没有 lib/arm64-v8a/libffmpeg.so")
-            z.getInputStream(e).use { i -> so.outputStream().use { o -> i.copyTo(o) } }
-        }
-        logger.lifecycle("extractFfmpeg: ${so.length() / 1024 / 1024} MB -> ${so.path}")
-    }
-}
-
 tasks.matching { it.name == "preBuild" }.configureEach {
-    dependsOn(copyVendorDex, extractFfmpeg)
+    dependsOn(copyVendorDex)
 }
