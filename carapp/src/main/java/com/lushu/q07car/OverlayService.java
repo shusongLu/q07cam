@@ -68,6 +68,8 @@ public class OverlayService extends Service {
     private static final long SWITCH_DELAY_MS = 250L;
 
     public static volatile boolean running = false;
+    /** 服务活着才继续跑轮询线程（否则 stopService/startService 会泄漏线程）。 */
+    private volatile boolean alive = false;
 
     private WindowManager wm;
     private TextView tvMain;
@@ -165,9 +167,10 @@ public class OverlayService extends Service {
         setupPreconnect();
 
         // 转向灯单独用高频线程读（只读 1 个属性，~20ms），把发现延迟从 300ms 压到 ~60ms
+        alive = true;
         new Thread(new Runnable() {
             @Override public void run() {
-                while (true) {
+                while (alive) {
                     pollTurn();
                     try { Thread.sleep(60L); } catch (InterruptedException e) { return; }
                 }
@@ -177,7 +180,7 @@ public class OverlayService extends Service {
         // 数据轮询也放后台：一次读 10 个属性约 200ms，跑在主线程会堵住界面节拍
         new Thread(new Runnable() {
             @Override public void run() {
-                while (true) {
+                while (alive) {
                     poll();
                     try { Thread.sleep(400L); } catch (InterruptedException e) { return; }
                 }
@@ -199,6 +202,7 @@ public class OverlayService extends Service {
     @Override
     public void onDestroy() {
         running = false;
+        alive = false;
         for (int i = 0; i < 2; i++) {
             stopPlayer(i);
             CamSide s = sides[i];
