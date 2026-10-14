@@ -88,6 +88,8 @@ public class OverlayService extends Service {
     private volatile int curTurn = 0;
     private volatile long curTurnAt = 0;
     private volatile int bothStreak = 0;
+    /** 收到转向信号的时间，用来量"信号 -> 出画面"的延迟。 */
+    private volatile long turnSignalAt = 0;
 
     // 摄像头
     private SurfaceView camView;
@@ -138,12 +140,30 @@ public class OverlayService extends Service {
             }
         }, "q07-soa").start();
 
+        // 转向灯单独用高频线程读（只读 1 个属性，~20ms），把发现延迟从 300ms 压到 ~60ms
+        new Thread(new Runnable() {
+            @Override public void run() {
+                while (true) {
+                    pollTurn();
+                    try { Thread.sleep(60L); } catch (InterruptedException e) { return; }
+                }
+            }
+        }, "q07-turn").start();
+
+        // 界面节拍：只做渲染 + 摄像头窗口切换（不读 SOA，很快）
+        handler.post(new Runnable() {
+            @Override public void run() {
+                render();
+                updateCamera();
+                handler.postDelayed(this, 100L);
+            }
+        });
+
+        // 数据节拍：SOA 读取较慢（10 个属性约 200ms），单独放 400ms
         handler.post(new Runnable() {
             @Override public void run() {
                 poll();
-                render();
-                updateCamera();
-                handler.postDelayed(this, 300L);
+                handler.postDelayed(this, 400L);
             }
         });
         running = true;
@@ -207,23 +227,36 @@ public class OverlayService extends Service {
             if ((a = soa.read(ID_REEV_OPER)) != null) {
                 for (int i = 0; i < reev.length && i < a.length; i++) reev[i] = a[i];
             }
-            if ((a = soa.read(ID_TURN_LI)) != null && a.length >= 2) {
-                long now = System.currentTimeMillis();
-                boolean l = a[0] != 0;
-                boolean r = a[1] != 0;
-                if (l && r) {
-                    // 左右同时亮：连读两次才认双闪（切换瞬间可能扫到一次）
-                    if (++bothStreak >= 2) { curTurn = 3; curTurnAt = now; }
-                } else if (l) {
-                    bothStreak = 0;
-                    curTurn = 1;
-                    curTurnAt = now;
-                } else if (r) {
-                    bothStreak = 0;
-                    curTurn = 2;
-                    curTurnAt = now;
-                }
-                // 左右都不亮：不动 curTurn，靠保持窗口维持（转向灯是闪烁的）
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 只读转向灯，供高频线程调用。 */
+    private void pollTurn() {
+        if (soa == null) return;
+        try {
+            int[] a = soa.read(ID_TURN_LI);
+            if (a == null || a.length < 2) return;
+            long now = System.currentTimeMillis();
+            boolean l = a[0] != 0;
+            boolean r = a[1] != 0;
+            int before = curTurn;
+            if (l && r) {
+                // 左右同时亮：连读两次才认双闪（切换瞬间可能扫到一次）
+                if (++bothStreak >= 2) { curTurn = 3; curTurnAt = now; }
+            } else if (l) {
+                bothStreak = 0;
+                curTurn = 1;
+                curTurnAt = now;
+            } else if (r) {
+                bothStreak = 0;
+                curTurn = 2;
+                curTurnAt = now;
+            }
+            // 左右都不亮：不动 curTurn，靠保持窗口维持（转向灯是闪烁的）
+            if (curTurn != before && (curTurn == 1 || curTurn == 2)) {
+                turnSignalAt = now;
+                Log.i(TAG, "[cam] 收到转向信号: " + turnName(curTurn));
             }
         } catch (Throwable ignored) {
         }
@@ -344,9 +377,9 @@ public class OverlayService extends Service {
             sv.getHolder().addCallback(new SurfaceHolder.Callback() {
                 @Override public void surfaceCreated(SurfaceHolder h) {
                     camSurface = h.getSurface();
+                    // surface 已就绪，立即喂流（首次打开不需要额外等待）
                     handler.removeCallbacks(startTask);
-                    // 让 surface 真正就绪后再喂流
-                    handler.postDelayed(startTask, 300L);
+                    startTask.run();
                 }
                 @Override public void surfaceChanged(SurfaceHolder h, int f, int w, int hh) { }
                 @Override public void surfaceDestroyed(SurfaceHolder h) {
@@ -393,7 +426,9 @@ public class OverlayService extends Service {
             int r2 = p.setSurface(camSurface);
             int r3 = p.play(camSurface);
             camPlayer = p;
-            Log.i(TAG, "[cam] " + url + " setDataSource=" + r1 + " setSurface=" + r2 + " play=" + r3);
+            long ms = System.currentTimeMillis() - turnSignalAt;
+            Log.i(TAG, "[cam] " + url + " setDataSource=" + r1 + " setSurface=" + r2 + " play=" + r3
+                    + "   信号->开始播放 " + ms + "ms");
         } catch (Throwable t) {
             Log.e(TAG, "[cam] startPlayback 失败: " + t);
             camPlayer = null;
