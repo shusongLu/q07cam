@@ -60,7 +60,7 @@ public class MainActivity extends Activity {
     private boolean darkNow;
 
     // Tab
-    private static final String[] TABS = {"数据", "悬浮窗", "摄像头", "设置"};
+    private static final String[] TABS = {"数据", "悬浮窗", "摄像头", "副驾屏", "设置"};
     private final LinearLayout[] pages = new LinearLayout[TABS.length];
     private final TextView[] tabViews = new TextView[TABS.length];
     private int curTab = 0;
@@ -143,7 +143,8 @@ public class MainActivity extends Activity {
         buildDataPage(pages[0]);
         buildOverlayPage(pages[1]);
         buildCameraPage(pages[2]);
-        buildSettingsPage(pages[3]);
+        buildCastPage(pages[3]);
+        buildSettingsPage(pages[4]);
 
         setContentView(rootAll);
         switchTab(0);
@@ -302,6 +303,140 @@ public class MainActivity extends Activity {
         }));
     }
 
+    // ================================================================ 副驾屏页
+
+    /** 独立一页：点应用图标 → 直接投到副驾屏。 */
+    private void buildCastPage(LinearLayout page) {
+        DisplayManager dm = (DisplayManager) getSystemService(DISPLAY_SERVICE);
+        Display[] all = dm != null ? dm.getDisplays() : new Display[0];
+
+        // 目标屏（只有一块屏时默认主屏）
+        final java.util.List<Display> targets = new java.util.ArrayList<>();
+        for (Display d : all) {
+            if (d.getDisplayId() != Display.DEFAULT_DISPLAY) targets.add(d);
+        }
+        final int[] target = {Prefs.getInt(this, Prefs.KEY_AUX_DISPLAY, -1)};
+        if (target[0] < 0 && !targets.isEmpty()) target[0] = targets.get(0).getDisplayId();
+
+        if (targets.isEmpty()) {
+            LinearLayout card = card(page, "副驾屏");
+            note(card, "没有检测到第二块屏。\n（车机上一般是「副驾屏」；平板上没接外接屏。）\n"
+                    + "下面仍会列出图标 —— 现在点只会开在主屏，**仅供预览**；上车后会自动投到副驾屏。");
+        }
+
+        if (!targets.isEmpty()) {
+            LinearLayout top = card(page, "投到哪块屏");
+            final RadioGroup dg = new RadioGroup(this);
+            dg.setOrientation(RadioGroup.VERTICAL);
+            for (int i = 0; i < targets.size(); i++) {
+                Display d = targets.get(i);
+                RadioButton rb = new RadioButton(this);
+                rb.setText(d.getName() + "（id " + d.getDisplayId() + "）");
+                rb.setTextSize(15f);
+                rb.setTextColor(cText);
+                rb.setButtonTintList(tint());
+                rb.setId(i);
+                if (d.getDisplayId() == target[0]) rb.setChecked(true);
+                dg.addView(rb);
+            }
+            top.addView(dg);
+            note_(top, "选好屏幕后，点下面的图标即可把那个应用打开到这块屏。");
+            this.castGroup = dg;
+        }
+
+        // 应用图标网格
+        LinearLayout grid = card(page, "点图标投屏");
+        PackageManager pm = getPackageManager();
+        java.util.List<ResolveInfo> apps = pm.queryIntentActivities(
+                new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0);
+        java.util.Collections.sort(apps, new java.util.Comparator<ResolveInfo>() {
+            @Override public int compare(ResolveInfo a, ResolveInfo b) {
+                return String.valueOf(a.loadLabel(pm)).compareToIgnoreCase(String.valueOf(b.loadLabel(pm)));
+            }
+        });
+
+        final int COLS = 6;
+        final java.util.List<Display> finalTargets = targets;
+        LinearLayout row = null;
+        int shown = 0;
+        for (final ResolveInfo ri : apps) {
+            if (ri.activityInfo == null) continue;
+            if (getPackageName().equals(ri.activityInfo.packageName)) continue;
+            if (shown >= 48) break;
+            if (shown % COLS == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setPadding(0, dp(10), 0, 0);
+                grid.addView(row);
+            }
+            row.addView(iconCell(ri, pm, finalTargets, target));
+            shown++;
+        }
+        if (shown == 0) note(grid, "没查到可启动的应用。");
+    }
+
+    private RadioGroup castGroup;
+
+    private LinearLayout iconCell(final ResolveInfo ri, PackageManager pm,
+                                  final java.util.List<Display> targets,
+                                  final int[] target) {
+        LinearLayout cell = new LinearLayout(this);
+        cell.setOrientation(LinearLayout.VERTICAL);
+        cell.setGravity(Gravity.CENTER_HORIZONTAL);
+        cell.setPadding(dp(6), dp(6), dp(6), dp(6));
+        cell.setLayoutParams(new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        android.widget.ImageView iv = new android.widget.ImageView(this);
+        int sz = dp(52);
+        iv.setLayoutParams(new LinearLayout.LayoutParams(sz, sz));
+        iv.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
+        try {
+            iv.setImageDrawable(ri.loadIcon(pm));
+        } catch (Throwable ignored) {
+        }
+        cell.addView(iv);
+
+        TextView tv = new TextView(this);
+        tv.setText(String.valueOf(ri.loadLabel(pm)));
+        tv.setTextSize(11f);
+        tv.setTextColor(cText);
+        tv.setGravity(Gravity.CENTER);
+        tv.setMaxLines(1);
+        tv.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        tv.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        cell.addView(tv);
+
+        cell.setBackground(round(Color.TRANSPARENT, 0, 12));
+        cell.setClickable(true);
+        cell.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (targets.isEmpty()) {
+                    // 没有副驾屏：开在主屏，仅预览
+                    launchAppOnDisplay(ri.activityInfo, Display.DEFAULT_DISPLAY);
+                    return;
+                }
+                int id = castGroup != null ? castGroup.getCheckedRadioButtonId() : -1;
+                int did = (id >= 0 && id < targets.size())
+                        ? targets.get(id).getDisplayId() : target[0];
+                launchAppOnDisplay(ri.activityInfo, did);
+            }
+        });
+        return cell;
+    }
+
+    private TextView note_(LinearLayout parent, String s) {
+        TextView tv = new TextView(this);
+        tv.setText(s);
+        tv.setTextSize(13f);
+        tv.setTextColor(cSub);
+        tv.setLineSpacing(dp(3), 1f);
+        tv.setPadding(0, dp(8), 0, dp(8));
+        parent.addView(tv);
+        return tv;
+    }
+
     // ================================================================ 设置页
 
     private void buildSettingsPage(LinearLayout page) {
@@ -332,10 +467,9 @@ public class MainActivity extends Activity {
             }
         }));
 
-        // 屏幕 / 副驾屏
+        // 屏幕
         LinearLayout scr = card(page, "屏幕");
-        note(scr, "点「在此屏打开」把这个界面投到那块屏上（车机副驾屏一般是第二块）。\n"
-                + "若某块屏是私有的，普通 App 可能被拒绝 —— 车机上再验。");
+        note(scr, "点「在此屏打开」把这个界面投到那块屏上；「悬浮窗」= 数据面板也投一份过去。");
         DisplayManager dm = (DisplayManager) getSystemService(DISPLAY_SERVICE);
         Display[] displays = dm != null ? dm.getDisplays() : new Display[0];
         for (final Display d : displays) {
@@ -369,71 +503,6 @@ public class MainActivity extends Activity {
         if (displays.length <= 1) {
             note(scr, "当前只检测到 1 块屏（平板上没接外接屏）。");
         }
-
-        // 投任意 App 到副驾屏（先搭架子，上车再验权限）
-        LinearLayout cast = card(page, "把别的 App 投到副驾屏");
-        note(cast, "先选一块屏，再点应用名，即把该应用启动到那块屏上。\n"
-                + "⚠ 车机副驾屏多为「私有屏」，普通 App 可能被系统拒绝（需上车实测，或改用系统级权限）。");
-
-        final Display[] allDisplays = displays;
-        final int[] selDisplay = {Prefs.getInt(this, Prefs.KEY_AUX_DISPLAY, -1)};
-        final RadioGroup dg = new RadioGroup(this);
-        dg.setOrientation(RadioGroup.VERTICAL);
-        for (int i = 0; i < allDisplays.length; i++) {
-            final Display d = allDisplays[i];
-            if (d.getDisplayId() == Display.DEFAULT_DISPLAY) continue;
-            RadioButton rb = new RadioButton(this);
-            rb.setText(d.getName() + "（id " + d.getDisplayId() + "）");
-            rb.setTextSize(15f);
-            rb.setTextColor(cText);
-            rb.setButtonTintList(tint());
-            rb.setId(1000 + i);
-            if (d.getDisplayId() == selDisplay[0]) rb.setChecked(true);
-            dg.addView(rb);
-        }
-        if (dg.getChildCount() == 0) {
-            note(cast, "没有可选的第二块屏。");
-        } else {
-            cast.addView(dg);
-        }
-
-        // 可启动的应用列表
-        TextView appListTitle = new TextView(this);
-        appListTitle.setText("点应用名投到所选屏：");
-        appListTitle.setTextSize(13f);
-        appListTitle.setTextColor(cSub);
-        appListTitle.setPadding(0, dp(10), 0, dp(4));
-        cast.addView(appListTitle);
-
-        PackageManager pm = getPackageManager();
-        Intent launcher = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
-        java.util.List<ResolveInfo> apps = pm.queryIntentActivities(launcher, 0);
-        java.util.Collections.sort(apps, new java.util.Comparator<ResolveInfo>() {
-            @Override public int compare(ResolveInfo a, ResolveInfo b) {
-                return String.valueOf(a.loadLabel(pm)).compareToIgnoreCase(String.valueOf(b.loadLabel(pm)));
-            }
-        });
-        int shown = 0;
-        for (final ResolveInfo ri : apps) {
-            if (ri.activityInfo == null) continue;
-            if (getPackageName().equals(ri.activityInfo.packageName)) continue;
-            if (shown++ >= 60) break;
-            LinearLayout row = hrow(cast);
-            TextView name = new TextView(this);
-            name.setText(String.valueOf(ri.loadLabel(pm)));
-            name.setTextSize(14f);
-            name.setTextColor(cText);
-            addWide(row, name, 1f);
-            Button go = mkButton("投放", false);
-            go.setOnClickListener(new View.OnClickListener() {
-                @Override public void onClick(View v) {
-                    int did = pickSelectedDisplay(dg, allDisplays, selDisplay[0]);
-                    launchAppOnDisplay(ri.activityInfo, did);
-                }
-            });
-            addWide(row, go, 0.6f);
-        }
-        if (shown == 0) note(cast, "没查到可启动的应用。");
 
         // 开机自启
         LinearLayout boot = card(page, "开机自启");

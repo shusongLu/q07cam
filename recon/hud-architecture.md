@@ -107,6 +107,38 @@ Android 侧无解。
 
 ---
 
+## 3.5 补充：HUD 是「模式驱动」的渲染器（实测+逆向）
+
+用户实测：**HUD 能显示地图、也能显示 SR（环境感知）画面** → 说明存在内容通道，只是**要进入相应模式才激活**。
+
+厂商代码里的对应证据：
+
+```java
+// com.incall.apps.casdkmanager.constants.CtSystemKey$SoftwareService1
+HUD_MAP_MODE                     // 一个「配置键」(didKey)，用 CheckConfigUtil.getConfig 读
+
+// com.incall.apps.setting.servicecomponent.util.KeyEventUtils
+hudMode0 = {0,1,2}   hudMode1 = {0,2}   hudMode3 = {0,1,2,3}   hudMode4 = {0,2,3}
+dispatchHudModeChange(action, value)  → 按 HUD_MAP_MODE 配置挑一套可用模式
+setHudMode(int) / volatile hudMode
+
+// soa4.dex 里的原因码
+CAR_ACCOMP_SR_HUD_NOT_RENDER     // “SR 在 HUD 上没渲染”
+CAR_ACCOMP_COND_NOT_MEET / CAR_ACCOMP_NO_SLOT
+
+// CtMapKey
+SDS_PATH_SHOW_KEY = "ADS_PathShow_Status"   // ADS 路径显示状态
+
+// 发给 HUD 的“状态”消息（不是画面）
+sendMsgToHud / sendMessageToHud / sendHUDMsgToQnx(0x11) / setHudAutoBrightness2QNX
+用途：隐私模式开关、超级省电、HUD 调节 —— 全是状态
+```
+
+**解读**：HUD 是个**封闭渲染器**，内容类型固定（车速 / 导航地图 / ADS-SR），
+Android 侧能做的只有「**选模式 + 发状态**」。地图/SR 的数据**从哪来**还没定位。
+
+→ **待验证**：HUD 导航模式打开时，Android 侧到底多了什么（新 display？新图层？新进程？新 type？）。
+
 ## 4. 可行的替代
 
 | 方案 | 说明 |
