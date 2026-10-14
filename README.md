@@ -217,3 +217,59 @@ INSTALL_FAILED_INVALID_APK: CAKJ failed to verify APK result
 系数集中在 `plugin/src/main/kotlin/com/lushu/plugin/DefaultVehiclePlugin.kt` 的 `companion object`，
 界面底部会显示原始值，便于一眼对照修正。
 
+---
+
+## 十、实时数据实测结论（全部实车验证）
+
+### 数据通道对照
+
+| 通道 | 权限 | 实时？ | 结论 |
+|---|---|---|---|
+| **厂商 HAL** `com.ca.car.proxy.CaCarPropertyManager` | **零权限** | ✅ **订阅后实时** | **主力通道** |
+| AOSP `android.car.CarPropertyManager` | 需 `android.car.permission.*`（部分特权级）| — | 弃用 |
+| 厂商 SOA（`SoaBridgeTransit`）| signature 级权限，客户端锁在系统应用里 | ✅ | 三方拿不到 |
+| logcat 里的 SOA 通知 | 只读 | ✅ | **转向灯只能走这里** |
+
+### 两个必踩的坑
+
+1. **`getProperty` 返回的是陈旧缓存，不是实时值。**
+   实测：车机电量已 49%，`getProperty` 仍返回 `150000`（=50%），10 秒 6 次读数一字不变。
+   **实时值必须 `registerServiceListener(propId, rate, listener)` 订阅。**
+2. **订阅回调经 Handler 投递 —— 宿主进程必须跑 `Looper.loop()`。**
+   否则事件全部积压在消息队列里，表现为"订阅成功、却一个事件都收不到"。
+   （`app_process` 里最容易漏这一步。）
+
+### 转向灯（不在 CarProperty 体系里）
+
+走厂商 SOA，只能从 logcat 读通知：
+```
+NTF propid:0x415245 name:Basc_ExtrLiInfoTips.Ntf_TurnLiInfo  Value:0 1
+                                                                    ↑左 ↑右
+```
+值会随闪烁在 `0 0` / `0 1` 之间交替，故用 **2.5 秒保持窗口**消除闪烁后再显示。
+
+### 标定值（实测）
+
+| 项 | 原始值 | 换算 |
+|---|---|---|
+| 电量 | 150000 | ÷3000 → 50% |
+| 续航 | 50000 | ÷1000 → 50 km |
+| 油量 | 15000 | ÷1000 → 15% |
+| 功率 | `EV_BATTERY_INSTANTANEOUS_CHARGE_RATE` | ×0.001 → kW |
+
+### 不安装版悬浮窗（临时方案）
+
+因 CAKJ 封死 adb 安装、渠道又要数日审核，另做了一条**不安装**的路：
+
+```powershell
+# 构建 + 推送（可选）
+powershell -ExecutionPolicy Bypass -File .\tools\build-overlay.ps1 -Push -Serial <IP:端口>
+# 启动 / 停止（需要 adb root）
+powershell -ExecutionPolicy Bypass -File .\tools\run-overlay.ps1 -Serial <IP:端口>
+powershell -ExecutionPolicy Bypass -File .\tools\run-overlay.ps1 -Serial <IP:端口> -Stop
+```
+
+- 源码：`tools/overlay/Main.java`；以 root 用 `app_process` 拉起 `TYPE_APPLICATION_OVERLAY` 悬浮窗
+- **不安装、不改 `/system`**；车机重启后需重新执行一次
+- 显示：功率 / 转速 / 车速 / 电量 / 续航 / 挡位 / 转向灯
+
