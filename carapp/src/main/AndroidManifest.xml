@@ -9,6 +9,7 @@
 
     <application
         android:label="Q07 实时数据"
+        android:theme="@android:style/Theme.Material.NoActionBar"
         android:allowBackup="false"
         android:usesCleartextTraffic="true">
 
@@ -24,13 +25,17 @@
 
         <service
             android:name=".OverlayService"
-            android:exported="false" />
+            android:exported="true" />
 
         <receiver
             android:name=".BootReceiver"
-            android:exported="true">
+            android:exported="true"
+            android:enabled="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 

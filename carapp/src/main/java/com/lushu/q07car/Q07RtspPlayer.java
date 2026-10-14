@@ -201,14 +201,39 @@ public class Q07RtspPlayer {
         }
     }
 
+    /**
+     * 重新 PLAY（不重连）。服务端只有一把 RTP 发送口，谁后 PLAY 谁独占 ——
+     * 切回来时只要 re-PLAY 就能把发送口抢回来，比重新连接快得多。
+     */
+    public boolean resume() {
+        try {
+            if (ctrl == null || sessionId == null) return false;
+            playing = false;
+            String base = "rtsp://" + host + ":" + port + "/" + path;
+            String r = rtsp("PLAY", base, "Session: " + sessionId);
+            playing = r.contains("200 OK");
+            auNals.clear();
+            fuBuf = null;
+            Log.i(TAG, "resume -> " + (playing ? "OK" : r.replace("\r\n", " | ")));
+            return playing;
+        } catch (Throwable t) {
+            Log.w(TAG, "resume 失败: " + t);
+            return false;
+        }
+    }
+
     public synchronized void stop() {
         running = false;
         playing = false;
+        // TEARDOWN 只发不等响应 —— 等响应会因服务端不回而卡满 5 秒超时，
+        // 把调用队列堵死（实测换边要 5.7 秒才返回）。
         try {
-            if (sessionId != null && ctrl != null) {
-                // 关键：明确 TEARDOWN，让服务端立刻释放那把唯一的发送口
+            if (sessionId != null && cout != null) {
                 String base = "rtsp://" + host + ":" + port + "/" + path;
-                rtsp("TEARDOWN", base, "Session: " + sessionId);
+                String req = "TEARDOWN " + base + " RTSP/1.0\r\nCSeq: " + (cseq++) + "\r\n"
+                        + "Session: " + sessionId + "\r\n\r\n";
+                cout.write(req.getBytes(ASCII));
+                cout.flush();
             }
         } catch (Throwable ignored) {
         }
@@ -217,6 +242,8 @@ public class Q07RtspPlayer {
         try { if (ctrl != null) ctrl.close(); } catch (Throwable ignored) {}
         rtpSock = rtcpSock = null;
         ctrl = null;
+        cin = null;
+        cout = null;
         releaseCodec();
         sessionId = null;
     }

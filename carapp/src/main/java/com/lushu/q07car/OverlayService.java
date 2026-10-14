@@ -6,8 +6,10 @@ import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -18,10 +20,13 @@ import android.text.style.RelativeSizeSpan;
 import android.text.style.StyleSpan;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.view.View;
 import android.view.WindowManager;
+import android.widget.FrameLayout;
 import android.widget.TextView;
 
 import java.util.Locale;
@@ -56,14 +61,17 @@ public class OverlayService extends Service {
     /** 转向灯保持窗口（去闪烁）。 */
     private static final long TURN_HOLD_MS = 2500L;
 
-    // 面板
-    private static final int PANEL_W = 1040, PANEL_H = 560, PANEL_X = 470, PANEL_Y = 170;
-    // 摄像头
-    private static final int CAM_W = 720, CAM_H = 405, CAM_X = 470, CAM_Y = 745;
+    // 面板 / 摄像头窗口的位置大小改为从 Prefs 读取（可由 App 界面编辑）
+    private int panelX, panelY, panelW, panelH;
+    private int camX, camY, camW, camH;
+    private boolean editMode;
+
+    /** 编辑模式下的抓手尺寸 */
+    private static final int HANDLE_DP = 44;
+    private static final int BORDER_DP = 3;
+
     private static final String RTSP_LEFT = "rtsp://172.16.6.26:8888/lt";
     private static final String RTSP_RIGHT = "rtsp://172.16.6.26:8888/rt";
-    /** 换边时的间隔：自研播放器 stop() 已发 TEARDOWN，只需很短间隔。 */
-    private static final long SWITCH_DELAY_MS = 80L;
 
     public static volatile boolean running = false;
     /** 服务活着才继续跑轮询线程（否则 stopService/startService 会泄漏线程）。 */
@@ -79,6 +87,8 @@ public class OverlayService extends Service {
     private volatile int gear = -1, gearInvalid = -1, powerShift = -1;
     private volatile int[] reev = new int[7];
     private volatile long lastLogAt = 0;
+    /** 上次渲染的文本，没变就不 setText（减少重绘） */
+    private volatile String lastText = "";
 
     /**
      * 当前转向状态：0 关 / 1 左 / 2 右 / 3 双闪。
@@ -105,11 +115,12 @@ public class OverlayService extends Service {
     private static final int OFFSCREEN_X = -3000;
 
     private static class CamSide {
-        SurfaceView view;
+        View view;              // 容器（含 SurfaceView，编辑模式下带边框和缩放抓手）
         Q07RtspPlayer player;
         Surface surface;
         String url;
         boolean onScreen;
+        boolean started;
     }
 
     private final CamSide[] sides = new CamSide[]{new CamSide(), new CamSide()};
@@ -129,23 +140,29 @@ public class OverlayService extends Service {
         handler = new Handler(Looper.getMainLooper());
 
         loadScale();
+        loadPrefs();
 
         tvMain = new TextView(this);
-        tvMain.setTextSize(30f);
         tvMain.setTextColor(0xFFE6EDF3);
         tvMain.setSingleLine(false);
         tvMain.setBackgroundColor(0xE60A0E12);
         tvMain.setPadding(44, 26, 44, 26);
+        // 字号按面板高度算（不用 autoSize：每帧自动测量会把主线程拖死）
+        tvMain.setTextSize(Math.max(10f, Math.min(40f, panelH / 19f)));
 
         WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                PANEL_W, PANEL_H,
+                panelW, panelH,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                        | (editMode ? 0 : WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE),
                 PixelFormat.TRANSLUCENT);
         lp.gravity = Gravity.TOP | Gravity.START;
-        lp.x = PANEL_X;
-        lp.y = PANEL_Y;
+        lp.x = panelX;
+        lp.y = panelY;
+        if (editMode) {
+            tvMain.setBackground(borderDrawable(0xCC00E5FF));
+            tvMain.setOnTouchListener(new DragTouch(0));
+        }
         try {
             wm.addView(tvMain, lp);
         } catch (Throwable t) {
@@ -160,8 +177,7 @@ public class OverlayService extends Service {
             }
         }, "q07-soa").start();
 
-        // 预连配置（可在 App 界面里切）
-        loadPrefs();
+        // 预连配置
         setupPreconnect();
 
         // 转向灯单独用高频线程读（只读 1 个属性，~20ms），把发现延迟从 300ms 压到 ~60ms
@@ -185,12 +201,19 @@ public class OverlayService extends Service {
             }
         }, "q07-poll").start();
 
-        // 界面节拍：只做渲染 + 摄像头窗口切换（不读 SOA，很快）
+        // 界面节拍：只做摄像头窗口切换（很轻），100ms 保证打灯响应
+        handler.post(new Runnable() {
+            @Override public void run() {
+                updateCamera();
+                handler.postDelayed(this, 100L);
+            }
+        });
+
+        // 数据面板：400ms 一次，且文本没变就不 setText（避免无谓重绘）
         handler.post(new Runnable() {
             @Override public void run() {
                 render();
-                updateCamera();
-                handler.postDelayed(this, 100L);
+                handler.postDelayed(this, 400L);
             }
         });
         running = true;
@@ -216,11 +239,124 @@ public class OverlayService extends Service {
     }
 
     private void loadPrefs() {
-        String p = getSharedPreferences("q07", MODE_PRIVATE).getString("preconnect", PRE_NONE);
+        String p = Prefs.getStr(this, Prefs.KEY_PRECONNECT, PRE_NONE);
         preMask = 0;
         if (PRE_LEFT.equals(p) || PRE_BOTH.equals(p)) preMask |= 1;
         if (PRE_RIGHT.equals(p) || PRE_BOTH.equals(p)) preMask |= 2;
-        Log.i(TAG, "[cam] 预连设置 = " + p + "（mask=" + preMask + "）");
+
+        panelX = Prefs.getInt(this, Prefs.KEY_PANEL_X, Prefs.DEF_PANEL_X);
+        panelY = Prefs.getInt(this, Prefs.KEY_PANEL_Y, Prefs.DEF_PANEL_Y);
+        panelW = Prefs.getInt(this, Prefs.KEY_PANEL_W, Prefs.DEF_PANEL_W);
+        panelH = Prefs.getInt(this, Prefs.KEY_PANEL_H, Prefs.DEF_PANEL_H);
+        camX = Prefs.getInt(this, Prefs.KEY_CAM_X, Prefs.DEF_CAM_X);
+        camY = Prefs.getInt(this, Prefs.KEY_CAM_Y, Prefs.DEF_CAM_Y);
+        camW = Prefs.getInt(this, Prefs.KEY_CAM_W, Prefs.DEF_CAM_W);
+        camH = Prefs.getInt(this, Prefs.KEY_CAM_H, Prefs.DEF_CAM_H);
+        editMode = Prefs.getBool(this, Prefs.KEY_EDIT, false);
+
+        Log.i(TAG, "[cam] 预连=" + p + "(mask=" + preMask + ")  面板=" + panelX + "," + panelY
+                + " " + panelW + "x" + panelH + "  摄像头=" + camX + "," + camY + " " + camW + "x" + camH
+                + "  编辑模式=" + editMode);
+    }
+
+    private int dp(float v) {
+        return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
+    }
+
+    /** 编辑模式下的高亮边框。 */
+    private GradientDrawable borderDrawable(int color) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(0x00000000);
+        d.setStroke(dp(BORDER_DP), color);
+        d.setCornerRadius(dp(6));
+        return d;
+    }
+
+    private void savePanelLayout() {
+        Prefs.putInt(this, Prefs.KEY_PANEL_X, panelX);
+        Prefs.putInt(this, Prefs.KEY_PANEL_Y, panelY);
+        Prefs.putInt(this, Prefs.KEY_PANEL_W, panelW);
+        Prefs.putInt(this, Prefs.KEY_PANEL_H, panelH);
+    }
+
+    private void saveCamLayout() {
+        Prefs.putInt(this, Prefs.KEY_CAM_X, camX);
+        Prefs.putInt(this, Prefs.KEY_CAM_Y, camY);
+        Prefs.putInt(this, Prefs.KEY_CAM_W, camW);
+        Prefs.putInt(this, Prefs.KEY_CAM_H, camH);
+    }
+
+    /** 拖动：整块窗口跟着手指走。 */
+    private class DragTouch implements View.OnTouchListener {
+        private final int which;   // 0=面板 1=摄像头
+        private float downX, downY;
+        private int startX, startY;
+        private boolean moved;
+
+        DragTouch(int which) { this.which = which; }
+
+        @Override public boolean onTouch(View v, MotionEvent e) {
+            WindowManager.LayoutParams lp = (WindowManager.LayoutParams) v.getLayoutParams();
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    downX = e.getRawX();
+                    downY = e.getRawY();
+                    startX = lp.x;
+                    startY = lp.y;
+                    moved = false;
+                    return true;
+                case MotionEvent.ACTION_MOVE:
+                    lp.x = startX + (int) (e.getRawX() - downX);
+                    lp.y = startY + (int) (e.getRawY() - downY);
+                    try { wm.updateViewLayout(v, lp); } catch (Throwable ignored) {}
+                    moved = true;
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    if (moved) {
+                        if (which == 0) { panelX = lp.x; panelY = lp.y; savePanelLayout(); }
+                        else { camX = lp.x; camY = lp.y; saveCamLayout(); }
+                    }
+                    return true;
+                default:
+                    return false;
+            }
+        }
+    }
+
+    /** 右下角缩放：拖边框改大小。 */
+    private class ResizeTouch implements View.OnTouchListener {
+        private float downX, downY;
+        private int startW, startH;
+
+        @Override public boolean onTouch(View v, MotionEvent e) {
+            View box = (View) v.getParent();
+            WindowManager.LayoutParams lp = (WindowManager.LayoutParams) box.getLayoutParams();
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    downX = e.getRawX();
+                    downY = e.getRawY();
+                    startW = lp.width;
+                    startH = lp.height;
+                    return true;
+                case MotionEvent.ACTION_MOVE:
+                    int w = Math.max(dp(160), startW + (int) (e.getRawX() - downX));
+                    int h = Math.max(dp(90), startH + (int) (e.getRawY() - downY));
+                    lp.width = w;
+                    lp.height = h;
+                    try { wm.updateViewLayout(box, lp); } catch (Throwable ignored) {}
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    camW = lp.width;
+                    camH = lp.height;
+                    saveCamLayout();
+                    Log.i(TAG, "[cam] 尺寸 -> " + camW + "x" + camH);
+                    return true;
+                default:
+                    return false;
+            }
+        }
     }
 
     private void startForegroundInternal() {
@@ -325,7 +461,10 @@ public class OverlayService extends Service {
         append(sb, String.format(Locale.US, "\nREEV=%d/%d/%d/%d", reev[0], reev[1], reev[2], reev[6]),
                 0.52f, 0x99FFFFFF, false);
 
-        if (tvMain != null) tvMain.setText(sb);
+        if (tvMain != null && !sb.toString().equals(lastText)) {
+            lastText = sb.toString();
+            tvMain.setText(sb);
+        }
 
         long now = System.currentTimeMillis();
         if (now - lastLogAt > 10000L) {
@@ -405,29 +544,46 @@ public class OverlayService extends Service {
 
         int other = 1 - want;
 
-        // 非预连的一侧：立刻收掉，别占着 RTSP 会话
-        if ((preMask & (1 << other)) == 0) stopSide(other);
-        else moveSide(other, false);
-
-        if ((preMask & (1 << want)) != 0) {
-            // 预连侧：窗口常驻（离屏），直接移进来即可 —— 零延迟
-            ensureSide(want, true);
+        // 关键顺序：先把要显示的那一侧 PLAY 起来（服务端会把唯一的发送口转给它），
+        // 再去收另一侧。反过来做会因为 TEARDOWN/重连的时序问题两边都收不到流。
+        if ((preMask & (1 << want)) != 0 || sides[want].view != null) {
+            ensureSide(want, (preMask & (1 << want)) != 0);
             if (sides[want].player == null) startSide(want);
+            else resumeSide(want);
             moveSide(want, true);
         } else {
-            CamSide s = sides[want];
-            if (s.view != null && s.player != null && urlOf(want).equals(s.url)) {
-                moveSide(want, true);
-            } else {
-                // 没预连：走"关 -> 等会话释放 -> 开"
-                stopSide(want);
-                sides[want].url = urlOf(want);
-                final int idx = want;
-                handler.removeCallbacks(startTask);
-                handler.postDelayed(startTask, SWITCH_DELAY_MS);
-                Log.i(TAG, "[cam] switch -> " + urlOf(want));
-            }
+            sides[want].url = urlOf(want);
+            ensureSide(want, false);
+            startSide(want);           // surface 就绪后会自行起播
+            curWant = want;
         }
+
+        // 再收掉另一侧（窗口层面；流已经被抢过来了）
+        if ((preMask & (1 << other)) != 0) moveSide(other, false);
+        else stopSide(other);
+    }
+
+    /** 当前希望显示的那一侧（-1 表示无）。 */
+    private volatile int curWant = -1;
+
+    /** 已经有 player 的一侧：re-PLAY 抢回发送口，不重连。 */
+    private void resumeSide(final int idx) {
+        final CamSide s = sides[idx];
+        if (s.player == null || s.onScreen) return;
+        camExec.execute(new Runnable() {
+            @Override public void run() {
+                if (s.player.resume()) {
+                    s.started = true;
+                    return;
+                }
+                // 会话可能已失效 -> 重连
+                try { s.player.stop(); } catch (Throwable ignored) {}
+                s.player = null;
+                s.started = false;
+                s.url = urlOf(idx);
+                startSide(idx);
+            }
+        });
     }
 
     private final Runnable startTask = new Runnable() {
@@ -443,7 +599,7 @@ public class OverlayService extends Service {
 
     /** 建窗口（预连的放屏幕外，非预连的直接放可见位置）。 */
     private void ensureSide(final int idx, boolean pre) {
-        CamSide s = sides[idx];
+        final CamSide s = sides[idx];
         if (s.view != null) return;
         try {
             SurfaceView sv = new SurfaceView(this);
@@ -458,21 +614,42 @@ public class OverlayService extends Service {
                     sides[idx].surface = null;
                 }
             });
+
+            // 容器：编辑模式下显示边框 + 右下角缩放抓手
+            FrameLayout box = new FrameLayout(this);
+            box.addView(sv, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
+            if (editMode) {
+                box.setBackground(borderDrawable(0xCCFFC400));
+                box.setOnTouchListener(new DragTouch(1));
+                View handle = new View(this);
+                GradientDrawable hd = new GradientDrawable();
+                hd.setColor(0xCCFFC400);
+                hd.setCornerRadius(dp(4));
+                handle.setBackground(hd);
+                FrameLayout.LayoutParams hp = new FrameLayout.LayoutParams(
+                        dp(HANDLE_DP), dp(HANDLE_DP), Gravity.END | Gravity.BOTTOM);
+                box.addView(handle, hp);
+                handle.setOnTouchListener(new ResizeTouch());
+            }
+
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                    CAM_W, CAM_H,
+                    camW, camH,
                     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                            | (editMode ? 0 : WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
                             | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                     PixelFormat.OPAQUE);
             lp.gravity = Gravity.TOP | Gravity.START;
-            lp.x = pre ? OFFSCREEN_X : CAM_X;
-            lp.y = CAM_Y;
-            wm.addView(sv, lp);
-            s.view = sv;
+            lp.x = pre ? OFFSCREEN_X : camX;
+            lp.y = camY;
+            wm.addView(box, lp);
+            s.view = box;
             s.url = urlOf(idx);
             s.onScreen = !pre;
-            Log.i(TAG, "[cam] 建窗口 " + (idx == SIDE_LEFT ? "左" : "右") + (pre ? "（预连，离屏）" : ""));
+            Log.i(TAG, "[cam] 建窗口 " + (idx == SIDE_LEFT ? "左" : "右") + (pre ? "（预连，离屏）" : "")
+                    + " " + camW + "x" + camH + " @" + lp.x + "," + lp.y);
         } catch (Throwable t) {
             Log.e(TAG, "[cam] ensureSide 失败: " + t);
         }
@@ -483,7 +660,8 @@ public class OverlayService extends Service {
         if (s.view == null || wm == null || s.onScreen == onScreen) return;
         try {
             WindowManager.LayoutParams lp = (WindowManager.LayoutParams) s.view.getLayoutParams();
-            lp.x = onScreen ? CAM_X : OFFSCREEN_X;
+            lp.x = onScreen ? camX : OFFSCREEN_X;
+            lp.y = camY;
             wm.updateViewLayout(s.view, lp);
             s.onScreen = onScreen;
             Log.i(TAG, "[cam] " + (onScreen ? "显示 " : "收起 ") + (idx == SIDE_LEFT ? "左" : "右"));
@@ -494,21 +672,23 @@ public class OverlayService extends Service {
 
     private void startSide(final int idx) {
         final CamSide s = sides[idx];
-        if (s.player != null || s.url == null) return;
+        if (s.started) return;
+        if (s.url == null) return;
         if (s.view == null) ensureSide(idx, (preMask & (1 << idx)) != 0);
-        final Q07RtspPlayer p = new Q07RtspPlayer(OverlayService.this, s.url);
-        final Surface surf = s.surface;
-        s.player = p;
+        if (s.player == null) s.player = new Q07RtspPlayer(OverlayService.this, s.url);
+        final Q07RtspPlayer p = s.player;
         camExec.execute(new Runnable() {
             @Override public void run() {
                 try {
-                    // 服务端只有一把发送口：刚 TEARDOWN 完要留一点时间，否则新连接收不到流
+                    Surface surf = s.surface;
+                    if (surf == null) return;          // surface 还没好，等 surfaceCreated 再调
+                    // 服务端只有一把发送口：刚 TEARDOWN 完要留一点时间
                     long wait = 150 - (System.currentTimeMillis() - lastStopAt);
                     if (wait > 0) Thread.sleep(wait);
-                    if (surf == null) return;
                     p.start(surf);
+                    s.started = true;
                     long ms = System.currentTimeMillis() - turnSignalAt;
-                    Log.i(TAG, "[cam] " + s.url + " 自研播放器已启动   信号->起播 " + ms + "ms");
+                    Log.i(TAG, "[cam] " + s.url + " 起播   信号->起播 " + ms + "ms");
                 } catch (Throwable t) {
                     Log.e(TAG, "[cam] startSide: " + t);
                 }
@@ -526,10 +706,11 @@ public class OverlayService extends Service {
         if (s.player != null) {
             final Q07RtspPlayer p = s.player;
             s.player = null;
+            s.started = false;
             lastStopAt = System.currentTimeMillis();
             camExec.execute(new Runnable() {
                 @Override public void run() {
-                    // 显式 TEARDOWN，让服务端立刻释放那把唯一的发送口
+                    // TEARDOWN 只发不等（等响应会卡 5 秒）
                     try { p.stop(); } catch (Throwable ignored) {}
                     Log.i(TAG, "[cam] stopped " + (idx == SIDE_LEFT ? "左" : "右"));
                 }
