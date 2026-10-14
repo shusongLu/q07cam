@@ -187,6 +187,8 @@ public class OverlayService extends Service {
 
         // 预连配置
         setupPreconnect();
+        // 副驾屏面板
+        setupAuxDisplay();
 
         // 转向灯单独用高频线程读（只读 1 个属性，~20ms），把发现延迟从 300ms 压到 ~60ms
         alive = true;
@@ -492,6 +494,7 @@ public class OverlayService extends Service {
         if (tvMain != null && !sb.toString().equals(lastText)) {
             lastText = sb.toString();
             tvMain.setText(sb);
+            if (auxView != null) auxView.setText(sb);
         }
 
         long now = System.currentTimeMillis();
@@ -765,6 +768,52 @@ public class OverlayService extends Service {
         if ((preMask & 2) != 0) { ensureSide(SIDE_RIGHT, true); }
         if (preMask != 0) {
             Log.i(TAG, "[cam] 预连掩码 = " + preMask + "（sides 建好后会自动拉流）");
+        }
+    }
+
+    // ---------------------------------------------------------------- 副驾屏
+
+    private WindowManager auxWm;
+    private TextView auxView;
+
+    /** 在指定屏幕上再开一份数据面板（副驾屏）。 */
+    private void setupAuxDisplay() {
+        int id = Prefs.getInt(this, Prefs.KEY_AUX_DISPLAY, -1);
+        if (id < 0) return;
+        try {
+            android.hardware.display.DisplayManager dm =
+                    (android.hardware.display.DisplayManager) getSystemService(DISPLAY_SERVICE);
+            if (dm == null) return;
+            android.view.Display target = null;
+            for (android.view.Display d : dm.getDisplays()) {
+                if (d.getDisplayId() == id) target = d;
+            }
+            if (target == null) {
+                Log.w(TAG, "[aux] 找不到 display " + id);
+                return;
+            }
+            Context dc = createDisplayContext(target);
+            auxWm = (WindowManager) dc.getSystemService(Context.WINDOW_SERVICE);
+            auxView = new TextView(dc);
+            auxView.setTextColor(0xFFE6EDF3);
+            auxView.setSingleLine(false);
+            auxView.setBackgroundColor(0xE60A0E12);
+            auxView.setPadding(44, 26, 44, 26);
+            auxView.setTextSize(Math.max(10f, Math.min(40f, panelH / 19f)));
+
+            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                    panelW, panelH,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                    PixelFormat.TRANSLUCENT);
+            lp.gravity = Gravity.TOP | Gravity.START;
+            lp.x = panelX;
+            lp.y = panelY;
+            auxWm.addView(auxView, lp);
+            Log.i(TAG, "[aux] 已在 display " + id + " 打开面板");
+        } catch (Throwable t) {
+            Log.e(TAG, "[aux] 打开失败（该屏可能是私有的）: " + t);
         }
     }
 }
