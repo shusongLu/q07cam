@@ -423,13 +423,13 @@ public class Main {
                 String[] parts = line.substring(valAt + 6).trim().split("\\s+");
                 if (parts.length < 2) continue;
                 boolean l = "1".equals(parts[0]);
-                boolean r = "1".equals(parts[1]);
+                boolean rr = "1".equals(parts[1]);
                 long now = System.currentTimeMillis();
-                if (l && r) {
+                if (l && rr) {
                     if (++bothStreak >= 2) { curTurn = 3; curTurnAt = now; }
                 } else if (l) {
                     bothStreak = 0; curTurn = 1; curTurnAt = now;
-                } else if (r) {
+                } else if (rr) {
                     bothStreak = 0; curTurn = 2; curTurnAt = now;
                 }
             }
