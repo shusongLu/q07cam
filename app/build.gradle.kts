@@ -50,6 +50,17 @@ android {
         }
     }
 
+    // 两个变体：full = 带车辆信号权限；nocar = 移除 car 权限（渠道检测对照实验）
+    flavorDimensions += "perm"
+    productFlavors {
+        create("full") {
+            dimension = "perm"
+        }
+        create("nocar") {
+            dimension = "perm"
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

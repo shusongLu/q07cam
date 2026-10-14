@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      nocar 变体：移除车辆信号权限，保留悬浮窗。
+      用途：对照实验 —— 判断渠道的"上架检测"是否由 android.car.permission.* 触发。
+      注意：本变体读不到车辆数据（属性访问会被系统按权限拒绝），仅用于检测实验。
+    -->
+    <uses-permission
+        android:name="android.car.permission.CAR_ENERGY"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.car.permission.CAR_SPEED"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.car.permission.CAR_POWERTRAIN"
+        tools:node="remove" />
+
+</manifest>
