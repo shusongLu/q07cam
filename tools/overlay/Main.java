@@ -98,17 +98,25 @@ public class Main {
             wm.addView(root, lp);
             System.out.println("[ovl] window added");
 
-            Thread poller = new Thread(new Runnable() {
-                @Override public void run() { pollVehicle(main); }
-            }, "q07-poll");
-            poller.setDaemon(true);
-            poller.start();
+            // 厂商 HAL：必须在**带 Looper 的线程**上初始化并订阅；回调靠 Handler 投递，
+            // 所以主线程要跑 Looper.loop()（下面就是）
+            pollVehicle(main);
 
             Thread turn = new Thread(new Runnable() {
                 @Override public void run() { watchTurnSignal(); }
             }, "q07-turn");
             turn.setDaemon(true);
             turn.start();
+
+            // 转向灯靠"时间窗口"算出来的，需要周期性重绘
+            final Handler ticker = new Handler(Looper.getMainLooper());
+            ticker.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    render();
+                    ticker.postDelayed(this, 500L);
+                }
+            }, 500L);
 
             System.out.println("[ovl] entering loop");
             Looper.loop();
@@ -128,69 +136,115 @@ public class Main {
     // ---------- 车辆信号轮询 ----------
 
     private static void pollVehicle(Handler main) {
-        Object mgr;
-        Method getProperty;
-        Method getValue;
+        // 注意：厂商 HAL 的 getProperty 返回的是**陈旧缓存**，实时值只能靠订阅事件。
+        // 订阅回调通过 Handler 投递，因此主线程必须跑 Looper.loop()（main() 里已经在跑）。
         try {
             Class<?> mgrCls = Class.forName("com.ca.car.proxy.hardware.property.CaCarPropertyManager");
-            mgr = mgrCls.getMethod("getInstance").invoke(null);
-            getProperty = mgrCls.getMethod("getProperty", int.class, int.class);
-            getValue = Class.forName("com.ca.car.proxy.hardware.CarPropertyValue").getMethod("getValue");
-            System.out.println("[ovl] vendor HAL ready");
+            final Object mgr = mgrCls.getMethod("getInstance").invoke(null);
+            final Method register = mgrCls.getMethod("registerServiceListener", int.class, float.class,
+                    Class.forName("com.ca.car.proxy.hardware.property.CaCarPropertyCallback$ICarPropertyOnEventListener"));
+
+            Class<?> listenerCls = Class.forName("com.ca.car.proxy.hardware.property.CaCarPropertyCallback$ICarPropertyOnEventListener");
+            Object listener = java.lang.reflect.Proxy.newProxyInstance(
+                    Main.class.getClassLoader(), new Class<?>[]{listenerCls},
+                    new java.lang.reflect.InvocationHandler() {
+                        @Override
+                        public Object invoke(Object proxy, Method method, Object[] args) {
+                            String n = method.getName();
+                            if (n.equals("onChangeEvent") && args != null && args.length == 1 && args[0] != null) {
+                                onPropertyEvent(args[0]);
+                            } else if (n.equals("toString")) {
+                                return "q07-listener";
+                            } else if (n.equals("hashCode")) {
+                                return System.identityHashCode(proxy);
+                            } else if (n.equals("equals")) {
+                                return proxy == args[0];
+                            }
+                            return null;
+                        }
+                    });
+
+            int[] ids = {ID_EV_CHARGE_RATE, ID_ENGINE_RPM, ID_EV_BATTERY_LEVEL,
+                    ID_RANGE_REMAINING, ID_FUEL_LEVEL, ID_PERF_SPEED, ID_GEAR_SELECTION};
+            for (int id : ids) {
+                try {
+                    register.invoke(mgr, id, 0.0f, listener);
+                } catch (Throwable t) {
+                    System.out.println("[ovl] subscribe 0x" + Integer.toHexString(id) + " failed: " + t);
+                }
+            }
+            System.out.println("[ovl] subscribed " + ids.length + " properties (event-driven)");
+
+            // 厂商只在「值变化」时推送，所以先用一次 getProperty 把初值播种进去，
+            // 之后一律以事件为准（getProperty 的缓存可能长期陈旧）。
+            try {
+                Method getProperty = mgrCls.getMethod("getProperty", int.class, int.class);
+                Method getValue = Class.forName("com.ca.car.proxy.hardware.CarPropertyValue").getMethod("getValue");
+                for (int id : ids) {
+                    try {
+                        Object v = getProperty.invoke(mgr, id, 0);
+                        if (v == null) continue;
+                        Object val = getValue.invoke(v);
+                        if (val instanceof Number) applyValue(id, ((Number) val).floatValue());
+                    } catch (Throwable ignored) {
+                    }
+                }
+                System.out.println("[ovl] seeded initial values");
+                main.post(new Runnable() {
+                    @Override public void run() { render(); }
+                });
+            } catch (Throwable ignored) {
+            }
         } catch (Throwable t) {
             System.out.println("[ovl] vendor HAL init failed: " + t);
             main.post(new Runnable() {
                 @Override public void run() { tvInfo1.setText("车辆服务连接失败"); }
             });
-            return;
-        }
-
-        while (true) {
-            try {
-                final float powerW = read(getProperty, getValue, mgr, ID_EV_CHARGE_RATE);
-                final float level = read(getProperty, getValue, mgr, ID_EV_BATTERY_LEVEL);
-                final float range = read(getProperty, getValue, mgr, ID_RANGE_REMAINING);
-                final float fuel = read(getProperty, getValue, mgr, ID_FUEL_LEVEL);
-                final float speed = read(getProperty, getValue, mgr, ID_PERF_SPEED);
-                final int gear = (int) read(getProperty, getValue, mgr, ID_GEAR_SELECTION);
-                final float rpm = read(getProperty, getValue, mgr, ID_ENGINE_RPM);
-                final String turn = turnText();
-
-                main.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        tvPower.setText(String.format("%.1f kW", powerW * POWER_W_TO_KW));
-                        tvRpm.setText(rpm > 0f
-                                ? String.format("%d rpm", (int) rpm)
-                                : "EV（增程器未启动）");
-                        tvInfo1.setText(String.format("电量 %.0f%%    续航 %.0f km    油 %.0f%%",
-                                level / SOC_DIVISOR, range / RANGE_DIVISOR, fuel / FUEL_DIVISOR));
-                        tvInfo2.setText(String.format("车速 %.0f km/h    挡位 %s    转向 %s",
-                                speed, gearName(gear), turn));
-                        tvRaw.setText(String.format("lvl=%.0f rng=%.0f fuel=%.0f pwr=%.0f spd=%.0f rpm=%.0f gear=%d turn=%s",
-                                level, range, fuel, powerW, speed, rpm, gear, turn));
-                    }
-                });
-            } catch (Throwable t) {
-                System.out.println("[ovl] poll error: " + t);
-            }
-            try {
-                Thread.sleep(100L);
-            } catch (InterruptedException e) {
-                break;
-            }
         }
     }
 
-    private static float read(Method getProperty, Method getValue, Object mgr, int id) {
+    // ---------- 事件处理（主线程；值来自推送，不要用 getProperty 的陈旧缓存） ----------
+
+    private static volatile float vPowerW, vLevel, vRange, vFuel, vSpeed, vRpm;
+    private static volatile int vGear = -1;
+    private static volatile boolean dirty = true;
+
+    private static void onPropertyEvent(Object carPropertyValue) {
         try {
-            Object v = getProperty.invoke(mgr, id, 0);
-            if (v == null) return 0f;
-            Object value = getValue.invoke(v);
-            return (value instanceof Number) ? ((Number) value).floatValue() : 0f;
-        } catch (Throwable t) {
-            return 0f;
+            int id = (Integer) carPropertyValue.getClass().getMethod("getPropertyId").invoke(carPropertyValue);
+            Object v = carPropertyValue.getClass().getMethod("getValue").invoke(carPropertyValue);
+            if (v instanceof Number) applyValue(id, ((Number) v).floatValue());
+        } catch (Throwable ignored) {
         }
+    }
+
+    /** 事件与播种共用：只更新我们关心的 7 个。 */
+    private static void applyValue(int id, float f) {
+        switch (id) {
+            case ID_EV_CHARGE_RATE: vPowerW = f; break;
+            case ID_ENGINE_RPM: vRpm = f; break;
+            case ID_EV_BATTERY_LEVEL: vLevel = f; break;
+            case ID_RANGE_REMAINING: vRange = f; break;
+            case ID_FUEL_LEVEL: vFuel = f; break;
+            case ID_PERF_SPEED: vSpeed = f; break;
+            case ID_GEAR_SELECTION: vGear = (int) f; break;
+            default: return;
+        }
+        dirty = true;
+    }
+
+    private static void render() {
+        final float powerW = vPowerW, level = vLevel, range = vRange, fuel = vFuel, speed = vSpeed, rpm = vRpm;
+        final int gear = vGear;
+        final String turn = turnText();
+        tvPower.setText(String.format("%.1f kW", powerW * POWER_W_TO_KW));
+        tvRpm.setText(rpm > 0f ? String.format("%d rpm", (int) rpm) : "EV（增程器未启动）");
+        tvInfo1.setText(String.format("电量 %.0f%%    续航 %.0f km    油 %.0f%%",
+                level / SOC_DIVISOR, range / RANGE_DIVISOR, fuel / FUEL_DIVISOR));
+        tvInfo2.setText(String.format("车速 %.0f km/h    挡位 %s    转向 %s",
+                speed, gearName(gear), turn));
+        tvRaw.setText(String.format("lvl=%.0f rng=%.0f fuel=%.0f pwr=%.0f spd=%.0f rpm=%.0f gear=%d turn=%s",
+                level, range, fuel, powerW, speed, rpm, gear, turn));
     }
 
     // ---------- 转向灯（厂商 SOA 通知，从 logcat 读） ----------
