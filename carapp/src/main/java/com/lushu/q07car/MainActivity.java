@@ -2,8 +2,12 @@ package com.lushu.q07car;
 
 import android.app.Activity;
 import android.app.ActivityOptions;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.Color;
@@ -366,6 +370,71 @@ public class MainActivity extends Activity {
             note(scr, "当前只检测到 1 块屏（平板上没接外接屏）。");
         }
 
+        // 投任意 App 到副驾屏（先搭架子，上车再验权限）
+        LinearLayout cast = card(page, "把别的 App 投到副驾屏");
+        note(cast, "先选一块屏，再点应用名，即把该应用启动到那块屏上。\n"
+                + "⚠ 车机副驾屏多为「私有屏」，普通 App 可能被系统拒绝（需上车实测，或改用系统级权限）。");
+
+        final Display[] allDisplays = displays;
+        final int[] selDisplay = {Prefs.getInt(this, Prefs.KEY_AUX_DISPLAY, -1)};
+        final RadioGroup dg = new RadioGroup(this);
+        dg.setOrientation(RadioGroup.VERTICAL);
+        for (int i = 0; i < allDisplays.length; i++) {
+            final Display d = allDisplays[i];
+            if (d.getDisplayId() == Display.DEFAULT_DISPLAY) continue;
+            RadioButton rb = new RadioButton(this);
+            rb.setText(d.getName() + "（id " + d.getDisplayId() + "）");
+            rb.setTextSize(15f);
+            rb.setTextColor(cText);
+            rb.setButtonTintList(tint());
+            rb.setId(1000 + i);
+            if (d.getDisplayId() == selDisplay[0]) rb.setChecked(true);
+            dg.addView(rb);
+        }
+        if (dg.getChildCount() == 0) {
+            note(cast, "没有可选的第二块屏。");
+        } else {
+            cast.addView(dg);
+        }
+
+        // 可启动的应用列表
+        TextView appListTitle = new TextView(this);
+        appListTitle.setText("点应用名投到所选屏：");
+        appListTitle.setTextSize(13f);
+        appListTitle.setTextColor(cSub);
+        appListTitle.setPadding(0, dp(10), 0, dp(4));
+        cast.addView(appListTitle);
+
+        PackageManager pm = getPackageManager();
+        Intent launcher = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+        java.util.List<ResolveInfo> apps = pm.queryIntentActivities(launcher, 0);
+        java.util.Collections.sort(apps, new java.util.Comparator<ResolveInfo>() {
+            @Override public int compare(ResolveInfo a, ResolveInfo b) {
+                return String.valueOf(a.loadLabel(pm)).compareToIgnoreCase(String.valueOf(b.loadLabel(pm)));
+            }
+        });
+        int shown = 0;
+        for (final ResolveInfo ri : apps) {
+            if (ri.activityInfo == null) continue;
+            if (getPackageName().equals(ri.activityInfo.packageName)) continue;
+            if (shown++ >= 60) break;
+            LinearLayout row = hrow(cast);
+            TextView name = new TextView(this);
+            name.setText(String.valueOf(ri.loadLabel(pm)));
+            name.setTextSize(14f);
+            name.setTextColor(cText);
+            addWide(row, name, 1f);
+            Button go = mkButton("投放", false);
+            go.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    int did = pickSelectedDisplay(dg, allDisplays, selDisplay[0]);
+                    launchAppOnDisplay(ri.activityInfo, did);
+                }
+            });
+            addWide(row, go, 0.6f);
+        }
+        if (shown == 0) note(cast, "没查到可启动的应用。");
+
         // 开机自启
         LinearLayout boot = card(page, "开机自启");
         Switch bootSw = new Switch(this);
@@ -410,6 +479,30 @@ public class MainActivity extends Activity {
         Prefs.putInt(this, Prefs.KEY_AUX_DISPLAY, on ? d.getDisplayId() : -1);
         restartService();
         toast(on ? ("悬浮窗已设到 display " + d.getDisplayId()) : "副驾屏悬浮窗已关闭");
+    }
+
+    private int pickSelectedDisplay(RadioGroup dg, Display[] all, int fallback) {
+        int id = dg.getCheckedRadioButtonId();
+        if (id >= 1000 && id - 1000 < all.length) return all[id - 1000].getDisplayId();
+        return fallback >= 0 ? fallback
+                : (all.length > 1 ? all[1].getDisplayId() : Display.DEFAULT_DISPLAY);
+    }
+
+    /** 把任意应用启动到指定屏幕上。 */
+    private void launchAppOnDisplay(ActivityInfo ai, int displayId) {
+        try {
+            Intent i = new Intent(Intent.ACTION_MAIN)
+                    .addCategory(Intent.CATEGORY_LAUNCHER)
+                    .setComponent(new ComponentName(ai.packageName, ai.name))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
+            Bundle opts = ActivityOptions.makeBasic()
+                    .setLaunchDisplayId(displayId).toBundle();
+            startActivity(i, opts);
+            Log.i(TAG, "投 " + ai.packageName + " 到 display " + displayId);
+        } catch (Throwable t) {
+            Log.e(TAG, "投屏失败: " + t);
+            toast("投屏失败：" + t.getClass().getSimpleName() + "（该屏可能是私有的）");
+        }
     }
 
     private void toast(final String s) {
