@@ -334,6 +334,14 @@ public class OverlayService extends Service {
                     "kw=%.1f pduV=%.1f pduI=%.1f hv=%.0f soc=%.0f range=%.0f odo=%.0f gear=%s spd=%.1f turn=%s",
                     kwPdu, pduVolt, pduCur, hvVolt, socPct, rangeKm, totalKm,
                     gearName(gear, gearInvalid), speed, turnName(turnState())));
+            for (int i = 0; i < 2; i++) {
+                CamSide cs = sides[i];
+                if (cs.player != null) {
+                    Log.i(TAG, String.format(Locale.US, "[cam] %s frames=%d 最后一包 %dms 前 窗上=%s 预连=%s",
+                            i == SIDE_LEFT ? "左" : "右", cs.player.frames(),
+                            now - cs.player.lastRecv(), cs.onScreen, (preMask & (1 << i)) != 0));
+                }
+            }
         }
     }
 
@@ -484,29 +492,48 @@ public class OverlayService extends Service {
         }
     }
 
-    private void startSide(int idx) {
-        CamSide s = sides[idx];
-        if (s.player != null || s.surface == null || s.url == null) return;
-        try {
-            if (s.view == null) ensureSide(idx, (preMask & (1 << idx)) != 0);
-            Q07RtspPlayer p = new Q07RtspPlayer(s.url);
-            p.start(s.surface);
-            s.player = p;
-            long ms = System.currentTimeMillis() - turnSignalAt;
-            Log.i(TAG, "[cam] " + s.url + " 自研播放器已启动   信号->起播 " + ms + "ms");
-        } catch (Throwable t) {
-            Log.e(TAG, "[cam] startSide 失败: " + t);
-            s.player = null;
-        }
+    private void startSide(final int idx) {
+        final CamSide s = sides[idx];
+        if (s.player != null || s.url == null) return;
+        if (s.view == null) ensureSide(idx, (preMask & (1 << idx)) != 0);
+        final Q07RtspPlayer p = new Q07RtspPlayer(OverlayService.this, s.url);
+        final Surface surf = s.surface;
+        s.player = p;
+        camExec.execute(new Runnable() {
+            @Override public void run() {
+                try {
+                    // 服务端只有一把发送口：刚 TEARDOWN 完要留一点时间，否则新连接收不到流
+                    long wait = 150 - (System.currentTimeMillis() - lastStopAt);
+                    if (wait > 0) Thread.sleep(wait);
+                    if (surf == null) return;
+                    p.start(surf);
+                    long ms = System.currentTimeMillis() - turnSignalAt;
+                    Log.i(TAG, "[cam] " + s.url + " 自研播放器已启动   信号->起播 " + ms + "ms");
+                } catch (Throwable t) {
+                    Log.e(TAG, "[cam] startSide: " + t);
+                }
+            }
+        });
     }
 
+    /** 单线程串行执行摄像头操作，避免"停/起"竞态。 */
+    private final java.util.concurrent.ExecutorService camExec =
+            java.util.concurrent.Executors.newSingleThreadExecutor();
+    private volatile long lastStopAt = 0;
+
     private void stopPlayer(int idx) {
-        CamSide s = sides[idx];
+        final CamSide s = sides[idx];
         if (s.player != null) {
-            // 自研播放器会在 stop() 里显式发 TEARDOWN，
-            // 让服务端立刻释放那把唯一的发送口（厂商播放器做不到这点）
-            try { s.player.stop(); } catch (Throwable ignored) {}
+            final Q07RtspPlayer p = s.player;
             s.player = null;
+            lastStopAt = System.currentTimeMillis();
+            camExec.execute(new Runnable() {
+                @Override public void run() {
+                    // 显式 TEARDOWN，让服务端立刻释放那把唯一的发送口
+                    try { p.stop(); } catch (Throwable ignored) {}
+                    Log.i(TAG, "[cam] stopped " + (idx == SIDE_LEFT ? "左" : "右"));
+                }
+            });
         }
     }
 

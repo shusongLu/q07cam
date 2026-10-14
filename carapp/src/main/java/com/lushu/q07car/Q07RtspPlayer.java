@@ -1,7 +1,12 @@
 package com.lushu.q07car;
 
+import android.content.Context;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
+import android.net.ConnectivityManager;
+import android.net.LinkAddress;
+import android.net.LinkProperties;
+import android.net.Network;
 import android.util.Log;
 import android.view.Surface;
 
@@ -66,7 +71,8 @@ public class Q07RtspPlayer {
     private int cseq = 1;
     private int rtpPayloadType = 127;
 
-    public Q07RtspPlayer(String url) {
+    public Q07RtspPlayer(Context ctx, String url) {
+        this.appCtx = ctx;
         // rtsp://host:port/path
         String s = url.startsWith("rtsp://") ? url.substring(7) : url;
         int slash = s.indexOf('/');
@@ -79,6 +85,66 @@ public class Q07RtspPlayer {
         } else {
             host = hostPort;
             port = 554;
+        }
+    }
+
+    private final Context appCtx;
+
+    /**
+     * 车机有 vlan6=172.16.6.x 这种内部车网，普通 App 默认不走它（Android 的 per-UID 路由），
+     * 直接 connect 会失败。这里找出承载目标地址的那条网络，把 socket 绑上去。
+     */
+    private Network findNetworkFor(String hostPrefix) {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) appCtx.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) { Log.w(TAG, "没有 ConnectivityManager"); return null; }
+            Network[] all = cm.getAllNetworks();
+            Log.i(TAG, "可见网络数 = " + (all == null ? 0 : all.length));
+            if (all == null) return null;
+            for (Network n : all) {
+                LinkProperties lp = cm.getLinkProperties(n);
+                if (lp == null || lp.getLinkAddresses() == null) continue;
+                StringBuilder sb = new StringBuilder();
+                for (LinkAddress la : lp.getLinkAddresses()) {
+                    String a = la.getAddress() != null ? la.getAddress().getHostAddress() : null;
+                    if (a == null) continue;
+                    sb.append(a).append(' ');
+                    if (a.startsWith(hostPrefix)) {
+                        Log.i(TAG, "目标网段命中: " + a + " -> " + n);
+                        return n;
+                    }
+                }
+                Log.i(TAG, "网络 " + n + " 地址: " + sb);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "findNetworkFor: " + t);
+        }
+        return null;
+    }
+
+    private static String hostPrefix(String h) {
+        int i = h.indexOf('.', h.indexOf('.') + 1);   // 取前三段，如 172.16.6.
+        int j = h.indexOf('.', i + 1);
+        return j > 0 ? h.substring(0, j + 1) : h;
+    }
+
+    private void bindToNetwork(Network net, java.net.Socket s) {
+        if (net == null || s == null) return;
+        try {
+            net.bindSocket(s);
+            Log.i(TAG, "已把 socket 绑到 " + net);
+        } catch (Throwable t) {
+            Log.w(TAG, "bindSocket 失败: " + t);
+        }
+    }
+
+    private void bindToNetwork(Network net, DatagramSocket s) {
+        if (net == null || s == null) return;
+        try {
+            net.bindSocket(s);
+            Log.i(TAG, "已把 UDP socket 绑到 " + net);
+        } catch (Throwable t) {
+            Log.w(TAG, "bindSocket(udp) 失败: " + t);
         }
     }
 
@@ -96,6 +162,8 @@ public class Q07RtspPlayer {
             vps = sps = pps = null;
 
             ctrl = new Socket();
+            Network net = findNetworkFor(hostPrefix(host));
+            bindToNetwork(net, ctrl);
             ctrl.connect(new InetSocketAddress(host, port), 5000);
             ctrl.setSoTimeout(5000);
             cin = ctrl.getInputStream();
@@ -109,14 +177,15 @@ public class Q07RtspPlayer {
             parseSdp(sdp);
 
             rtpSock = new DatagramSocket(0);
+            bindToNetwork(net, rtpSock);
             int rtpPort = rtpSock.getLocalPort();
             rtcpSock = new DatagramSocket(rtpPort + 1);
+            bindToNetwork(net, rtcpSock);
             rtpSock.setSoTimeout(1000);
 
             String setupResp = rtsp("SETUP", base + "/track0",
                     "Transport: RTP/AVP;unicast;client_port=" + rtpPort + "-" + (rtpPort + 1));
             sessionId = headerValue(setupResp, "Session");
-
             rtsp("PLAY", base, "Session: " + sessionId);
 
             rtpThread = new Thread(new Runnable() {

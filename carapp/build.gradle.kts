@@ -30,8 +30,8 @@ android {
         applicationId = "de.dsa.ford.otaflash"
         minSdk = 30
         targetSdk = 30
-        versionCode = 18
-        versionName = "2.0"
+        versionCode = 20
+        versionName = "2.1"
 
         ndk {
             abiFilters += "arm64-v8a"
