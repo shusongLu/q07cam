@@ -152,6 +152,41 @@ adb install -r renamed-test.apk
 
 ---
 
+## 4.5 应用商店「内测应用」为什么能装（实测）
+
+`com.changan.appmarket` **是系统应用**（`/system/app/AppMarket`，`sharedUserId=android.uid.system`，uid 1000）。
+
+实测（在商店里点「下载 via」全程抓目录）：
+
+```
+/data/data/com.changan.appmarket/files/download/mark.via/
+    mark.via.apk        2628334  ← 下载中的临时名 mark.via.apk.tmp
+    appchangan.crt         1138  ← 证书
+    signed                  344  ← base64 的 RSA-2048 签名
+```
+
+三个文件就位后商店立即调 `PackageInstaller` 安装，装完把目录清空。
+**它走的正是第 2 节 ③ 的 `verity()`** —— 所以「内测应用」不是绕过了校验，而是**长安服务端给每个 APK 签了一份 `signed`**。
+
+关键点：`signed` 签的是 **APK 的 SHA-256**，与 APK 自己的签名**无关**。所以任何开发者签名的 APK，只要经长安签名就能装。
+
+### 抓到的证书（所有应用共用同一张）
+
+```
+Subject: C=CN, O=CHANGAN, OU=OTA_RSA2048, CN=APPCHANGAN_RSA2048
+Issuer : C=CN, O=CHA CA,  CN=CHANGAN Services CA
+有效期 : 2024-05-22 → 2039-05-19
+密钥   : RSA 2048
+```
+
+即：**OTA 和商店用的是同一把 2048 位私钥**（`APPCHANGAN_RSA2048`）。
+在整机 `/system /vendor /product /fota` 里搜过，**没有私钥**（`PRIVATE KEY` 命中全是 BouncyCastle 的字符串常量）。
+2048 位 RSA 无法分解 → **`signed` 伪造不了**。
+
+> 结论：**商店这条路是「发布渠道」，不是「绕过方法」**。想让自己的 App 走商店，只能走长安的发布/内测流程（服务端签名）。
+
+---
+
 ## 5. 关键结论
 
 1. 安装校验 = `PackageInstallerSession` + `ext.jar` 的 `APKVerityUtil`，**不是**可 `pm disable` 的 App，也**不是**网络校验（离线也拦）。
@@ -159,3 +194,4 @@ adb install -r renamed-test.apk
 3. 本机 `isDebug=false`、签名无法伪造 → **只剩「白名单包名」可走**。
 4. **已经把 APK 装进去了**：把包名改成 `de.dsa.ford.otaflash`（白名单第二位，未安装）即 `Success`。
 5. 要装任意包名，只能改 `ext.jar`（详见第 4 节）。
+6. **应用商店的「内测应用」能装，是因为长安服务端用 `APPCHANGAN_RSA2048` 私钥给每个 APK 签了 `signed`**（签的是 APK 哈希，与 APK 自身签名无关）；证书/私钥不在车上，伪造不了 → 商店是**发布渠道**，不是绕过手段。

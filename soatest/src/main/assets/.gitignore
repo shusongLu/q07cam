@@ -1,0 +1,2 @@
+# 构建时会自动从 recon/libs/soabridge 拷进来（见 soatest/build.gradle.kts）
+*.dex

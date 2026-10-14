@@ -14,4 +14,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "q07battery"
-include(":core", ":app", ":plugin")
+include(":core", ":app", ":plugin", ":soatest")
