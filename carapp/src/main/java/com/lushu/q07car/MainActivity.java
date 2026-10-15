@@ -588,6 +588,38 @@ public class MainActivity extends Activity {
         boot.addView(bootSw);
         note(boot, "Android 8+ 在开机广播里必须用 startForegroundService，用 startService 会被静默拒绝 —— 已修。");
 
+        // 调试（无线 ADB）
+        LinearLayout dbg = card(page, "调试（无线 ADB）");
+        note(dbg, "临时开启/关闭车机的无线 ADB（连不上电脑时很实用）。\n"
+                + "需要 WRITE_SECURE_SETTINGS 权限 —— 从长安应用商店安装后会自动获得（本机「应用管家」就是这样）。\n"
+                + "如果显示「未授予」，说明当前是 adb 直装的，等商店版本即可。");
+        final TextView adbState = new TextView(this);
+        adbState.setTextSize(13f);
+        adbState.setTextColor(cSub);
+        adbState.setLineSpacing(dp(3), 1f);
+        adbState.setPadding(0, dp(6), 0, 0);
+        adbState.setTypeface(Typeface.MONOSPACE);
+        dbg.addView(adbState);
+
+        LinearLayout adbRow = hrow(dbg);
+        Button bOn = mkButton("开启无线 ADB", true);
+        bOn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { wirelessAdb(true, adbState); }
+        });
+        addWide(adbRow, bOn, 1f);
+        Button bOff = mkButton("关闭", false);
+        bOff.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { wirelessAdb(false, adbState); }
+        });
+        addWide(adbRow, bOff, 0.7f);
+
+        dbg.addView(ghost("刷新状态", new View.OnClickListener() {
+            @Override public void onClick(View v) { adbProbe(adbState); }
+        }));
+        adbState.post(new Runnable() {
+            @Override public void run() { adbProbe(adbState); }
+        });
+
         // 保活
         LinearLayout keep = card(page, "保活");
         note(keep, "车机会休眠、也会回收后台进程。开启电池优化白名单能显著降低被杀的几率；\n"
@@ -661,8 +693,134 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void updateKeepState(TextView tv) {
+    // ---------------------------------------------------------------- 无线 ADB
+
+    private static final String P_WRITE_SECURE = "android.permission.WRITE_SECURE_SETTINGS";
+
+    private boolean hasSecureWrite() {
         try {
+            return checkSelfPermission(P_WRITE_SECURE)
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 只读：把当前 ADB 状态显示出来（含本机 IP，方便直接复制连接命令）。 */
+    private void adbProbe(final TextView tv) {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                StringBuilder sb = new StringBuilder();
+                boolean perm = hasSecureWrite();
+                sb.append("WRITE_SECURE_SETTINGS : ").append(perm ? "已授予 ✅" : "未授予 ❌").append('\n');
+                try {
+                    android.content.ContentResolver cr = getContentResolver();
+                    sb.append("adb_enabled          : ")
+                            .append(android.provider.Settings.Global.getInt(cr, "adb_enabled", -1)).append('\n');
+                    sb.append("adb_wifi_enabled     : ")
+                            .append(android.provider.Settings.Global.getInt(cr, "adb_wifi_enabled", -1)).append('\n');
+                } catch (Throwable t) {
+                    sb.append("读取设置失败: ").append(t.getClass().getSimpleName()).append('\n');
+                }
+                sb.append("service.adb.tcp.port : ").append(prop("service.adb.tcp.port")).append('\n');
+                sb.append("本机 IP              : ").append(localIp()).append('\n');
+                sb.append("连接命令             : adb connect ").append(localIp()).append(":5555");
+                if (!perm) {
+                    sb.append("\n\n（未授予权限 → 目前只能看状态；\n从长安商店安装的版本会自动获得）");
+                }
+                final String s = sb.toString();
+                ui.post(new Runnable() {
+                    @Override public void run() { tv.setText(s); }
+                });
+            }
+        }, "adb-status").start();
+    }
+
+    /** 开/关无线 ADB（需要 WRITE_SECURE_SETTINGS）。 */
+    private void wirelessAdb(final boolean on, final TextView tv) {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                StringBuilder sb = new StringBuilder();
+                if (!hasSecureWrite()) {
+                    sb.append("❌ 没有 WRITE_SECURE_SETTINGS 权限，无法开启。\n\n")
+                            .append("这是签名级权限，只有从长安应用商店安装的版本才会被授予\n")
+                            .append("（本机「应用管家」就是这样拿到的）。\n")
+                            .append("当前 adb 直装的版本拿不到 —— 等商店版本即可。");
+                    post(tv, sb.toString());
+                    return;
+                }
+                try {
+                    // 1) 先把 TCP 端口设好（adbd 启动时读它）
+                    Class<?> sp = Class.forName("android.os.SystemProperties");
+                    sp.getMethod("set", String.class, String.class)
+                            .invoke(null, "service.adb.tcp.port", on ? "5555" : "-1");
+                    sb.append("service.adb.tcp.port = ").append(on ? "5555" : "-1").append("  ✅\n");
+
+                    // 2) 开关 adb（先关再开，强制 system_server 重新配置 adbd，让新端口生效）
+                    android.content.ContentResolver cr = getContentResolver();
+                    android.provider.Settings.Global.putInt(cr, "adb_enabled", 0);
+                    Thread.sleep(300);
+                    android.provider.Settings.Global.putInt(cr, "adb_enabled", on ? 1 : 0);
+                    sb.append("adb_enabled = ").append(on ? 1 : 0).append("  ✅\n");
+
+                    // 3) Android 11+ 的"无线调试"开关（配对码那套）
+                    android.provider.Settings.Global.putInt(cr, "adb_wifi_enabled", on ? 1 : 0);
+                    sb.append("adb_wifi_enabled = ").append(on ? 1 : 0).append("  ✅\n");
+
+                    sb.append("\n").append(on ? "无线 ADB 已开启" : "无线 ADB 已关闭");
+                    if (on) sb.append("\nadb connect ").append(localIp()).append(":5555");
+                } catch (Throwable t) {
+                    sb.append("失败: ").append(t).append('\n');
+                }
+                post(tv, sb.toString());
+            }
+        }, "adb-set").start();
+    }
+
+    private void post(final TextView tv, final String s) {
+        ui.post(new Runnable() {
+            @Override public void run() { tv.setText(s); }
+        });
+    }
+
+    /** 本机 WiFi/以太网 IPv4 地址。 */
+    private String localIp() {
+        try {
+            java.util.Enumeration<java.net.NetworkInterface> nis =
+                    java.net.NetworkInterface.getNetworkInterfaces();
+            String fallback = "?";
+            while (nis != null && nis.hasMoreElements()) {
+                java.net.NetworkInterface ni = nis.nextElement();
+                if (!ni.isUp() || ni.isLoopback()) continue;
+                java.util.Enumeration<java.net.InetAddress> as = ni.getInetAddresses();
+                while (as.hasMoreElements()) {
+                    java.net.InetAddress a = as.nextElement();
+                    if (a.isLoopbackAddress() || a instanceof java.net.Inet6Address) continue;
+                    String ip = a.getHostAddress();
+                    if (ip == null) continue;
+                    if (ip.startsWith("192.168.137.") || ip.startsWith("192.168.") || ip.startsWith("10.")) {
+                        return ip;
+                    }
+                    fallback = ip;
+                }
+            }
+            return fallback;
+        } catch (Throwable t) {
+            return "?";
+        }
+    }
+
+    private String prop(String k) {
+        try {
+            Class<?> sp = Class.forName("android.os.SystemProperties");
+            Object v = sp.getMethod("get", String.class, String.class).invoke(null, k, "");
+            return String.valueOf(v);
+        } catch (Throwable t) {
+            return "?";
+        }
+    }
+
+    private void updateKeepState(TextView tv) {        try {
             android.os.PowerManager pm =
                     (android.os.PowerManager) getSystemService(POWER_SERVICE);
             boolean ok = pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());

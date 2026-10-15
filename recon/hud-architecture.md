@@ -203,7 +203,66 @@ ESTAB  172.16.119.1:39192  →  172.16.119.2:10002
 
 ---
 
-## 7. 可行的替代
+## 8. ★ HUD 数据通道已逆向出来（B 路线）
+
+装 r2（`radare2-6.2.4-w64`）反汇编 `libMXNavi.so` 得到：
+
+### 8.1 两个通道
+
+| 通道 | 位置 | 实现 | 用途 |
+|---|---|---|---|
+| **UDP** | `172.16.119.2:10003` | `HudDataSender` | 小报文（≤约 1 MB，分片） |
+| **WebSocket** | `ws://172.16.119.2:10002` | `service_map::CMapService::SendHUDData` | 大数据流（实测 ~106 Mbps） |
+
+### 8.2 UDP 报文格式（`HudDataSender`，已完整还原）
+
+`HudDataSender::initialize`（`0x902f60`）：
+
+```asm
+socket(AF_INET=2, SOCK_DGRAM=2, IPPROTO_UDP=0x11)
+w8 = 0x1327_0002 → sockaddr_in{sin_family=AF_INET, sin_port=0x2713}
+inet_pton(AF_INET, "172.16.119.2", &sin_addr)      ; 字符串 @0xc39b96
+```
+
+`doSend` 发送循环（`0x902d24`）：
+
+```asm
+w28 = 0xffc                      ; 分片大小 4092
+memset(buf, 0, 0xffc)
+memcpy(buf, payload + i*4092, chunk)    ; 逐片拷贝
+strh w26, [sp, 0x20]   ; 头 2 字节：序号(seq)
+strb w27, [sp, 0x22]   ; 头 1 字节：总片数(totalChunks)
+strb w21, [sp, 0x23]   ; 头 1 字节：片序号(chunkIndex)
+sendto(fd, sp+0x20, chunk + 4, 0, &sockaddr, 16)
+```
+
+**即：每个 UDP 报文 = 4 字节头 + ≤4092 字节负载**
+
+```
+offset 0: uint16  seq          (小端)
+offset 2: uint8   totalChunks
+offset 3: uint8   chunkIndex
+offset 4: 负载（最多 4092 字节）
+```
+
+`sendData`（`0x90320c`）先把 `(buf,len)` 拷进队列再唤醒发送线程；
+`len >= 0xFEC05`（约 1 MB）直接丢弃并打 `HudDataSender sendData data too big`。
+
+### 8.3 现场可连性（不需要 root）
+
+* WebSocket 手工握手成功：`101 Switching Protocols`、`Server: WebSocket++/0.8.2`，**只收不发**；
+* 该盒只开 10002（80/8080/10000/10001/10003(TCP)/5000/8888 全关），任何 HTTP 请求都被直接升级；
+* 车机上连它的连接至少有 **2 条**（说明接受多客户端）。
+
+### 8.4 还差什么
+
+* **UDP 负载语义未知**：`sendData(buf,len)` 的 `buf` 由上层组装，直接调用点没在 `.text` 里找到（疑似间接调用/虚表）。
+* **WebSocket 帧格式未知**：`SendHUDData` 被 strip，没符号；需要继续定位其代码（引用 `ws://172.16.119.2:10002` @`0xc3bee7` 的站点有 14 处候选）。
+
+---
+
+## 9. 可行的替代
+
 
 | 方案 | 说明 |
 |---|---|
