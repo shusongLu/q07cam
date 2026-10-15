@@ -22,8 +22,9 @@ import android.util.Log;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.Surface;
-import android.view.SurfaceHolder;
-import android.view.SurfaceView;
+import android.graphics.Matrix;
+import android.graphics.SurfaceTexture;
+import android.view.TextureView;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
@@ -74,6 +75,9 @@ public class OverlayService extends Service {
     private boolean editMode;
     private boolean showPanel = true;
     private boolean showCamera = true;
+    /** 画面镜像（左右各自）。 */
+    private boolean mirrorLeft = true;
+    private boolean mirrorRight = true;
 
     /** 编辑模式下的抓手尺寸 */
     private static final int HANDLE_DP = 44;
@@ -85,6 +89,12 @@ public class OverlayService extends Service {
     private static final String RTSP_RIGHT = "rtsp://172.16.6.26:8888/rt";
 
     public static volatile boolean running = false;
+    /** 主界面是否在前台（由 MainActivity 通知）—— 用于"没人看就省资源"。 */
+    public static volatile boolean uiForeground = false;
+
+    public static void setUiForeground(boolean f) {
+        uiForeground = f;
+    }
     /** 服务活着才继续跑轮询线程（否则 stopService/startService 会泄漏线程）。 */
     private volatile boolean alive = false;
 
@@ -225,8 +235,9 @@ public class OverlayService extends Service {
         new Thread(new Runnable() {
             @Override public void run() {
                 while (alive) {
-                    pollTurn();
-                    try { Thread.sleep(60L); } catch (InterruptedException e) { return; }
+                    boolean need = needTurn();
+                    if (need) pollTurn();
+                    try { Thread.sleep(need ? 60L : 500L); } catch (InterruptedException e) { return; }
                 }
             }
         }, "q07-turn").start();
@@ -303,6 +314,8 @@ public class OverlayService extends Service {
         editMode = Prefs.getBool(this, Prefs.KEY_EDIT, false);
         showPanel = Prefs.getBool(this, Prefs.KEY_SHOW_PANEL, true);
         showCamera = Prefs.getBool(this, Prefs.KEY_SHOW_CAMERA, true);
+        mirrorLeft = Prefs.getBool(this, Prefs.KEY_MIRROR_LEFT, true);
+        mirrorRight = Prefs.getBool(this, Prefs.KEY_MIRROR_RIGHT, true);
 
         Log.i(TAG, "[cam] 预连=" + p + "(mask=" + preMask + ")  面板=" + panelX + "," + panelY
                 + " " + panelW + "x" + panelH + "  摄像头=" + camX + "," + camY + " " + camW + "x" + camH
@@ -438,8 +451,28 @@ public class OverlayService extends Service {
 
     // ---------------------------------------------------------------- 数据
 
+    // ---------------------------------------------------------------- 省资源
+
+    /**
+     * 需要「完整车辆数据」吗 —— 数据面板 / 主界面 / 副驾面板任一在显示才需要。
+     * 都不在时（用户把面板关了、也没打开 App），每 2 秒读十几个 SOA 属性纯属浪费。
+     */
+    private boolean needFullData() {
+        return showPanel || uiForeground || auxView != null;
+    }
+
+    /** 需要转向灯吗 —— 面板要显示转向状态，或摄像头要跟着打灯切换。 */
+    private boolean needTurn() {
+        return needFullData() || showCamera;
+    }
+
     private void poll() {
         if (soa == null) return;
+        if (!needFullData()) {
+            // 低功耗：不读 SOA，但保持健康时间戳 —— 否则看门狗会误判「12 秒没数据」去重建连接
+            lastPollOkAt = System.currentTimeMillis();
+            return;
+        }
         try {
             int[] a;
             boolean any = false;
@@ -523,6 +556,7 @@ public class OverlayService extends Service {
     // ---------------------------------------------------------------- 渲染
 
     private void render() {
+        if (!showPanel && auxView == null) { return; }   // 没人看就不必拼字符串
         SpannableStringBuilder sb = new SpannableStringBuilder();
         append(sb, String.format(Locale.US, "%.2f kW", kwPdu), 2.6f,
                 charging ? 0xFF6EC6FF : 0xFF8AE234, true);
@@ -785,6 +819,12 @@ public class OverlayService extends Service {
 
     private void updateCamera() {
         if (wm == null) return;
+        // 摄像头功能关掉 → 连预连一起收掉，释放 RTSP 会话 + 解码器
+        if (!showCamera) {
+            if (camBuilt) releaseCameras();
+            return;
+        }
+        if (!camBuilt) setupPreconnect();
         int turn = showCamera ? turnState() : 0;
         int want = (turn == 1) ? SIDE_LEFT : (turn == 2) ? SIDE_RIGHT : -1;
 
@@ -859,17 +899,30 @@ public class OverlayService extends Service {
         final CamSide s = sides[idx];
         if (s.view != null) return;
         try {
-            SurfaceView sv = new SurfaceView(this);
-            sv.getHolder().addCallback(new SurfaceHolder.Callback() {
-                @Override public void surfaceCreated(SurfaceHolder h) {
-                    sides[idx].surface = h.getSurface();
+            final TextureView sv = new TextureView(this);
+            sv.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
+                @Override public void onSurfaceTextureAvailable(SurfaceTexture st, int w, int h) {
+                    sides[idx].surface = new Surface(st);
+                    applyMirror(idx, sv);
                     startSide(idx);
                 }
-                @Override public void surfaceChanged(SurfaceHolder h, int f, int w, int hh) { }
-                @Override public void surfaceDestroyed(SurfaceHolder h) {
-                    stopPlayer(idx);
-                    sides[idx].surface = null;
+                @Override public void onSurfaceTextureSizeChanged(SurfaceTexture st, int w, int h) {
+                    applyMirror(idx, sv);
                 }
+                @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture st) {
+                    final Surface old = sides[idx].surface;
+                    sides[idx].surface = null;
+                    stopPlayer(idx);                     // 异步停流
+                    if (old != null) {
+                        camExec.execute(new Runnable() {  // 停完再释放 surface
+                            @Override public void run() {
+                                try { old.release(); } catch (Throwable ignored) {}
+                            }
+                        });
+                    }
+                    return true;
+                }
+                @Override public void onSurfaceTextureUpdated(SurfaceTexture st) { }
             });
 
             // 容器：编辑模式下显示边框 + 右下角缩放抓手
@@ -990,11 +1043,52 @@ public class OverlayService extends Service {
 
     /** 预连侧：开机就把流拉起来（窗口在屏外）。 */
     private void setupPreconnect() {
+        if (!showCamera) { camBuilt = false; return; }
         if ((preMask & 1) != 0) { ensureSide(SIDE_LEFT, true); }
         if ((preMask & 2) != 0) { ensureSide(SIDE_RIGHT, true); }
+        camBuilt = true;
         if (preMask != 0) {
             Log.i(TAG, "[cam] 预连掩码 = " + preMask + "（sides 建好后会自动拉流）");
         }
+    }
+
+    // ---------------------------------------------------------------- 摄像头：镜像 / 释放
+
+    /** 摄像头窗口是否已建（用于「不需要就释放、需要就重建」）。 */
+    private volatile boolean camBuilt = false;
+
+    /**
+     * 应用镜像。改成 TextureView 就是为了这个：
+     * SurfaceView 是系统合成层，拿不到可变换的矩阵；TextureView 是应用侧合成，
+     * 直接 setTransform 一个以中轴翻转的矩阵即可（setScale(-1, 1) 就是水平镜像）。
+     */
+    private void applyMirror(int idx, TextureView tv) {
+        boolean mirror = (idx == SIDE_LEFT) ? mirrorLeft : mirrorRight;
+        int w = tv.getWidth(), h = tv.getHeight();
+        if (!mirror || w <= 0 || h <= 0) {
+            tv.setTransform(null);
+            return;
+        }
+        Matrix m = new Matrix();
+        m.setScale(-1f, 1f, w / 2f, h / 2f);   // 以中轴翻转
+        tv.setTransform(m);
+    }
+
+    /** 彻底释放摄像头（含预连窗口）：RTSP 会话 + H.265 解码器全部回收。 */
+    private void releaseCameras() {
+        camBuilt = false;
+        for (int i = 0; i < 2; i++) {
+            stopPlayer(i);
+            CamSide s = sides[i];
+            if (s.view != null && wm != null) {
+                try { wm.removeView(s.view); } catch (Throwable ignored) {}
+            }
+            s.view = null;
+            s.surface = null;
+            s.onScreen = false;
+            s.started = false;
+        }
+        Log.i(TAG, "[cam] 已释放摄像头资源（含预连）");
     }
 
     // ---------------------------------------------------------------- 副驾屏

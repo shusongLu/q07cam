@@ -28,6 +28,9 @@ public class Prefs {
     // 功能开关
     public static final String KEY_SHOW_PANEL = "show_panel";
     public static final String KEY_SHOW_CAMERA = "show_camera";
+    // 摄像头画面镜像（左右各自）
+    public static final String KEY_MIRROR_LEFT = "mirror_left";
+    public static final String KEY_MIRROR_RIGHT = "mirror_right";
     // 开机自启
     public static final String KEY_BOOT = "boot";
 

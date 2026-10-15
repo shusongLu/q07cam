@@ -184,7 +184,15 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // 告诉服务：主界面在前台 → 需要完整数据（低功耗模式下会跳过 SOA 轮询）
+        OverlayService.setUiForeground(true);
         refresh();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        OverlayService.setUiForeground(false);
     }
 
     private void switchTab(int idx) {
@@ -316,6 +324,30 @@ public class MainActivity extends Activity {
         });
         sw.addView(camSw);
         note(sw, "关掉后打转向灯不会弹摄像头窗口（也不会去连 RTSP，省资源）。");
+
+        Switch mirL = new Switch(this);
+        styleSwitch(mirL, "左侧画面镜像（左右翻转）");
+        mirL.setChecked(Prefs.getBool(this, Prefs.KEY_MIRROR_LEFT, true));
+        mirL.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override public void onCheckedChanged(CompoundButton b, boolean checked) {
+                Prefs.putBool(MainActivity.this, Prefs.KEY_MIRROR_LEFT, checked);
+                restartService();
+            }
+        });
+        sw.addView(mirL);
+
+        Switch mirR = new Switch(this);
+        styleSwitch(mirR, "右侧画面镜像（左右翻转）");
+        mirR.setChecked(Prefs.getBool(this, Prefs.KEY_MIRROR_RIGHT, true));
+        mirR.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override public void onCheckedChanged(CompoundButton b, boolean checked) {
+                Prefs.putBool(MainActivity.this, Prefs.KEY_MIRROR_RIGHT, checked);
+                restartService();
+            }
+        });
+        sw.addView(mirR);
+        note(sw, "镜像后画面像后视镜一样（左右翻转）。渲染用 TextureView + 矩阵实现，"
+                + "镜像与窗口大小无关，缩放/拖动后依然正确。");
 
         LinearLayout cam = card(page, "侧摄像头预连");
         note(cam, "实测：车机 RTSP 服务端（LIVE555）**支持多客户端同时收流**。\n"
