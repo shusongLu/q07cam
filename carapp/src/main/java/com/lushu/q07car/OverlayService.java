@@ -52,6 +52,7 @@ public class OverlayService extends Service {
     private static final int ID_RESI_MILG    = 0x00412055; // 剩余里程 km
     private static final int ID_TOTAL_MILG   = 0x00501000; // 总里程
     private static final int ID_REEV_OPER    = 0x00413072; // 增程器运行参数
+    private static final int ID_ENG_THML     = 0x0041317B; // 发动机热管理  [7]=转速rpm ★实测
     private static final int ID_TURN_LI      = 0x00415244; // 转向灯 [0]=左 [1]=右
 
     /** PDU[0] 量纲：×0.01 A（可用 /data/local/tmp/q07scale.txt 覆盖）。 */
@@ -94,6 +95,10 @@ public class OverlayService extends Service {
     // 数据
     private volatile float kwPdu, pduVolt, pduCur, hvVolt, socPct, rangeKm, totalKm, speed;
     private volatile int gear = -1, gearInvalid = -1, powerShift = -1;
+    /** 发动机转速(rpm)：来自 0x0041317B[7]（实测：停机 1000 / 运行 4020~4250） */
+    private volatile int rpm = 0;
+    /** 发电机输出功率(W)：来自 BCU(0x00419307)[9] */
+    private volatile int genPowerW = 0;
     private volatile int[] reev = new int[7];
     private volatile long lastLogAt = 0;
     /** 上次渲染的文本，没变就不 setText（减少重绘） */
@@ -440,7 +445,10 @@ public class OverlayService extends Service {
             if ((a = soa.read(ID_POWER_SHIFT)) != null && a.length >= 1) { powerShift = a[0]; any = true; }
             if ((a = soa.read(ID_RESI_MILG)) != null && a.length >= 1) { rangeKm = a[0]; any = true; }
             if ((a = soa.read(ID_TOTAL_MILG)) != null && a.length >= 1) { totalKm = a[0]; any = true; }
-            if ((a = soa.read(ID_BCU_OPER_PRM)) != null && a.length > 12) { hvVolt = a[12]; any = true; }
+            if ((a = soa.read(ID_BCU_OPER_PRM)) != null) {
+                if (a.length > 12) { hvVolt = a[12]; any = true; }
+                if (a.length > 9) genPowerW = a[9];
+            }
             if ((a = soa.read(ID_PT_LAMP)) != null && a.length > 25) { socPct = a[25]; any = true; }
             if ((a = soa.read(ID_PDU_OPER_PRM)) != null && a.length > 13) {
                 pduVolt = a[8] / 10f;
@@ -452,6 +460,7 @@ public class OverlayService extends Service {
                 for (int i = 0; i < reev.length && i < a.length; i++) reev[i] = a[i];
                 any = true;
             }
+            if ((a = soa.read(ID_ENG_THML)) != null && a.length > 7) { rpm = a[7]; any = true; }
             // 必须"真的读到东西"才算健康 —— 否则读不到时也会刷新时间戳，看门狗就失效了
             if (any) {
                 liveOk = true;
@@ -478,6 +487,8 @@ public class OverlayService extends Service {
                 "车速|" + String.format(Locale.US, "%.1f km/h", speed),
                 "电源|" + powerShiftName(powerShift),
                 "转向灯|" + turnName(turnState()),
+                "发动机转速|" + rpm + " rpm",
+                "发电功率|" + String.format(Locale.US, "%.2f kW", genPowerW / 1000f),
                 "增程器|" + reev[0] + " / " + reev[1] + " / " + reev[2] + " / " + reev[6],
         };
     }
@@ -511,6 +522,8 @@ public class OverlayService extends Service {
         append(sb, String.format(Locale.US, "\n挡位 %s   ·   %.1f km/h   ·   电源 %s   ·   转向 %s",
                 gearName(gear, gearInvalid), speed, powerShiftName(powerShift), turnName(turnState())),
                 1f, 0xFFE6EDF3, false);
+        append(sb, String.format(Locale.US, "\n转速 %d rpm   ·   发电 %.2f kW",
+                rpm, genPowerW / 1000f), 1f, 0xFFFCE94F, false);
         append(sb, String.format(Locale.US, "\nREEV=%d/%d/%d/%d", reev[0], reev[1], reev[2], reev[6]),
                 0.52f, 0x99FFFFFF, false);
 
