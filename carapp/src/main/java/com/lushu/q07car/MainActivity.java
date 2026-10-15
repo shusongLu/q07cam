@@ -325,29 +325,48 @@ public class MainActivity extends Activity {
         sw.addView(camSw);
         note(sw, "关掉后打转向灯不会弹摄像头窗口（也不会去连 RTSP，省资源）。");
 
-        Switch mirL = new Switch(this);
-        styleSwitch(mirL, "左侧画面镜像（左右翻转）");
-        mirL.setChecked(Prefs.getBool(this, Prefs.KEY_MIRROR_LEFT, true));
-        mirL.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            @Override public void onCheckedChanged(CompoundButton b, boolean checked) {
-                Prefs.putBool(MainActivity.this, Prefs.KEY_MIRROR_LEFT, checked);
-                restartService();
-            }
-        });
-        sw.addView(mirL);
+        LinearLayout mir = card(page, "画面镜像");
+        note(mir, "画面是 TextureView + 矩阵渲染的，可以任意翻转（原来用 SurfaceView 做不到）。\n"
+                + "左右两侧各自选，改完点下面的按钮生效（会重启悬浮窗，画面闪一下）。");
 
-        Switch mirR = new Switch(this);
-        styleSwitch(mirR, "右侧画面镜像（左右翻转）");
-        mirR.setChecked(Prefs.getBool(this, Prefs.KEY_MIRROR_RIGHT, true));
-        mirR.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            @Override public void onCheckedChanged(CompoundButton b, boolean checked) {
-                Prefs.putBool(MainActivity.this, Prefs.KEY_MIRROR_RIGHT, checked);
+        final String[] modes = {Prefs.MIRROR_H, Prefs.MIRROR_NONE, Prefs.MIRROR_V, Prefs.MIRROR_HV};
+        final String[] modeLabels = {"水平镜像（像后视镜）— 默认", "不镜像（原样）", "垂直翻转", "水平 + 垂直（180°）"};
+
+        final RadioGroup[] groups = new RadioGroup[2];
+        final String[] titles = {"左侧摄像头", "右侧摄像头"};
+        final String[] mirKeys = {Prefs.KEY_MIRROR_LEFT, Prefs.KEY_MIRROR_RIGHT};
+        for (int g = 0; g < 2; g++) {
+            TextView lb = new TextView(this);
+            lb.setText(titles[g]);
+            lb.setTextSize(15f);
+            lb.setTextColor(cSub);
+            mir.addView(lb);
+
+            RadioGroup rg = new RadioGroup(this);
+            rg.setOrientation(RadioGroup.VERTICAL);
+            String curMode = Prefs.getStr(this, mirKeys[g], Prefs.MIRROR_H);
+            for (int i = 0; i < modes.length; i++) {
+                RadioButton rb = new RadioButton(this);
+                rb.setText(modeLabels[i]);
+                rb.setTextSize(15f);
+                rb.setTextColor(cText);
+                rb.setButtonTintList(tint());
+                rb.setId(i);
+                if (modes[i].equals(curMode)) rb.setChecked(true);
+                rg.addView(rb);
+            }
+            mir.addView(rg);
+            groups[g] = rg;
+        }
+        mir.addView(primary("应用镜像设置", new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                for (int g = 0; g < 2; g++) {
+                    int id = groups[g].getCheckedRadioButtonId();
+                    Prefs.putStr(MainActivity.this, mirKeys[g], modes[id >= 0 && id < modes.length ? id : 0]);
+                }
                 restartService();
             }
-        });
-        sw.addView(mirR);
-        note(sw, "镜像后画面像后视镜一样（左右翻转）。渲染用 TextureView + 矩阵实现，"
-                + "镜像与窗口大小无关，缩放/拖动后依然正确。");
+        }));
 
         LinearLayout cam = card(page, "侧摄像头预连");
         note(cam, "实测：车机 RTSP 服务端（LIVE555）**支持多客户端同时收流**。\n"

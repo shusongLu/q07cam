@@ -28,9 +28,13 @@ public class Prefs {
     // 功能开关
     public static final String KEY_SHOW_PANEL = "show_panel";
     public static final String KEY_SHOW_CAMERA = "show_camera";
-    // 摄像头画面镜像（左右各自）
-    public static final String KEY_MIRROR_LEFT = "mirror_left";
-    public static final String KEY_MIRROR_RIGHT = "mirror_right";
+    // 摄像头画面镜像模式：none | h | v | hv（左右各自）
+    public static final String KEY_MIRROR_LEFT = "mirror_left_mode";
+    public static final String KEY_MIRROR_RIGHT = "mirror_right_mode";
+    public static final String MIRROR_NONE = "none";
+    public static final String MIRROR_H = "h";     // 水平镜像（像后视镜）
+    public static final String MIRROR_V = "v";     // 垂直翻转
+    public static final String MIRROR_HV = "hv";   // 水平 + 垂直（等于 180° 旋转）
     // 开机自启
     public static final String KEY_BOOT = "boot";
 

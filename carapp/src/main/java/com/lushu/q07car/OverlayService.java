@@ -75,9 +75,9 @@ public class OverlayService extends Service {
     private boolean editMode;
     private boolean showPanel = true;
     private boolean showCamera = true;
-    /** 画面镜像（左右各自）。 */
-    private boolean mirrorLeft = true;
-    private boolean mirrorRight = true;
+    /** 画面镜像模式（none/h/v/hv）。 */
+    private String mirrorLeft = Prefs.MIRROR_H;
+    private String mirrorRight = Prefs.MIRROR_H;
 
     /** 编辑模式下的抓手尺寸 */
     private static final int HANDLE_DP = 44;
@@ -314,8 +314,8 @@ public class OverlayService extends Service {
         editMode = Prefs.getBool(this, Prefs.KEY_EDIT, false);
         showPanel = Prefs.getBool(this, Prefs.KEY_SHOW_PANEL, true);
         showCamera = Prefs.getBool(this, Prefs.KEY_SHOW_CAMERA, true);
-        mirrorLeft = Prefs.getBool(this, Prefs.KEY_MIRROR_LEFT, true);
-        mirrorRight = Prefs.getBool(this, Prefs.KEY_MIRROR_RIGHT, true);
+        mirrorLeft = Prefs.getStr(this, Prefs.KEY_MIRROR_LEFT, Prefs.MIRROR_H);
+        mirrorRight = Prefs.getStr(this, Prefs.KEY_MIRROR_RIGHT, Prefs.MIRROR_H);
 
         Log.i(TAG, "[cam] 预连=" + p + "(mask=" + preMask + ")  面板=" + panelX + "," + panelY
                 + " " + panelW + "x" + panelH + "  摄像头=" + camX + "," + camY + " " + camW + "x" + camH
@@ -1060,17 +1060,22 @@ public class OverlayService extends Service {
     /**
      * 应用镜像。改成 TextureView 就是为了这个：
      * SurfaceView 是系统合成层，拿不到可变换的矩阵；TextureView 是应用侧合成，
-     * 直接 setTransform 一个以中轴翻转的矩阵即可（setScale(-1, 1) 就是水平镜像）。
+     * 直接 setTransform 一个"以视图中心翻转"的矩阵即可。
+     *
+     * mode: none / h（水平，像后视镜）/ v（垂直）/ hv（水平+垂直 = 180°）
      */
     private void applyMirror(int idx, TextureView tv) {
-        boolean mirror = (idx == SIDE_LEFT) ? mirrorLeft : mirrorRight;
+        String mode = (idx == SIDE_LEFT) ? mirrorLeft : mirrorRight;
+        if (mode == null) mode = Prefs.MIRROR_NONE;
+        boolean hz = mode.contains("h");
+        boolean vt = mode.contains("v");
         int w = tv.getWidth(), h = tv.getHeight();
-        if (!mirror || w <= 0 || h <= 0) {
+        if ((!hz && !vt) || w <= 0 || h <= 0) {
             tv.setTransform(null);
             return;
         }
         Matrix m = new Matrix();
-        m.setScale(-1f, 1f, w / 2f, h / 2f);   // 以中轴翻转
+        m.setScale(hz ? -1f : 1f, vt ? -1f : 1f, w / 2f, h / 2f);   // 以视图中心翻转
         tv.setTransform(m);
     }
 
