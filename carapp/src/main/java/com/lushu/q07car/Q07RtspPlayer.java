@@ -62,6 +62,17 @@ public class Q07RtspPlayer {
     private MediaCodec codec;
     private Surface surface;
     private int width = 1920, height = 1080;
+    /**
+     * 要不要把解码结果画到 Surface 上。
+     *
+     * 隐藏的那一路设 false —— 走 releaseOutputBuffer(idx, false)（标准"丢帧"），
+     * 于是：解码继续、缓冲队列不会堆、而且**完全不做纹理合成/上传**。
+     * 实测 TextureView 每条流每帧的固定合成开销约 3.5% 单核，与窗口大小无关，
+     * 所以"不渲染"才是省资源的关键；显示时切成 true，下一帧（~33ms）就出画。
+     */
+    private volatile boolean renderOutput = true;
+
+    public void setRender(boolean r) { renderOutput = r; }
 
     private byte[] vps, sps, pps;
     private long frameCount;
@@ -220,8 +231,8 @@ public class Q07RtspPlayer {
             String base = "rtsp://" + host + ":" + port + "/" + path;
             String r = rtsp("PLAY", base, "Session: " + sessionId);
             playing = r.contains("200 OK");
-            auNals.clear();
-            fuBuf = null;
+            auLen = 0;
+            fuLen = 0;
             Log.i(TAG, "resume -> " + (playing ? "OK" : r.replace("\r\n", " | ")));
             return playing;
         } catch (Throwable t) {
@@ -434,10 +445,16 @@ public class Q07RtspPlayer {
 
     // ---------------------------------------------------------------- RTP 收流 + 拆包
 
-    /** 当前访问单元（AU）里累积的 NAL（含起始码）。 */
-    private final List<byte[]> auNals = new ArrayList<>();
-    /** FU 分片重组缓冲。 */
-    private ByteArrayOutputStream fuBuf;
+    /**
+     * 当前访问单元（AU）：**直接攒进可复用缓冲**，不再每个 NAL 都 new byte[]。
+     * 1080p30 的流每秒有几百个 NAL，原来的写法每秒制造几百次分配，
+     * 白白喂给 GC（实测 HeapTaskDaemon 占 3.9% 单核）。
+     */
+    private byte[] auBuf = new byte[64 * 1024];
+    private int auLen = 0;
+    /** FU 分片重组缓冲：同样可复用。 */
+    private byte[] fuBuf = new byte[16 * 1024];
+    private int fuLen = 0;
     /** 当前 RTP 时间戳（用来判断一帧结束）。 */
     private long curRtpTs;
     /** 调试：打印前几个 NAL 类型。 */
@@ -506,17 +523,17 @@ public class Q07RtspPlayer {
             boolean endBit = (fuHeader & 0x40) != 0;
             int origType = fuHeader & 0x3F;
             if (startBit) {
-                fuBuf = new ByteArrayOutputStream();
-                byte b0 = (byte) ((data[off] & 0x81) | (origType << 1));
-                fuBuf.write(b0);
-                fuBuf.write(data[off + 1]);
+                fuLen = 0;
+                putFu((byte) ((data[off] & 0x81) | (origType << 1)));
+                putFu(data[off + 1]);
             }
-            if (fuBuf != null) {
-                fuBuf.write(data, off + 3, len - (off + 3));
+            if (fuLen > 0) {
+                appendFu(data, off + 3, len - (off + 3));
                 if (endBit) {
-                    byte[] nal = fuBuf.toByteArray();
-                    fuBuf = null;
-                    handleNal(nal, 0, nal.length);
+                    int n = fuLen;
+                    byte[] fb = fuBuf;
+                    fuLen = 0;
+                    handleNal(fb, 0, n);
                 }
             }
         } else if (nalType == NAL_PACI) {
@@ -529,63 +546,92 @@ public class Q07RtspPlayer {
         if (marker) submitAccessUnit();
     }
 
-    /** 收到一个完整 NAL：参数集单独存，其他的进当前 AU。 */
+    /** 收到一个完整 NAL：参数集单独存，其他的攒进当前 AU（全部复用缓冲，零分配）。 */
     private void handleNal(byte[] b, int off, int len) {
         if (len < 2) return;
         int type = (b[off] >> 1) & 0x3F;
-        byte[] nal = new byte[len];
-        System.arraycopy(b, off, nal, 0, len);
 
-        if (type == 32) {                       // VPS
-            vps = nal;
-            return;
-        } else if (type == 33) {                // SPS
-            sps = nal;
-            return;
-        } else if (type == 34) {                // PPS
-            pps = nal;
-            return;
-        }
+        if (type == 32) { vps = copyOf(b, off, len); return; }        // VPS
+        if (type == 33) { sps = copyOf(b, off, len); return; }        // SPS
+        if (type == 34) { pps = copyOf(b, off, len); return; }        // PPS
 
         // 这个流既没有 RTP marker、时间戳也恒为 0，只能靠 H.265 自己的
         // first_slice_segment_in_pic_flag（slice header 第一个 bit）判断新一帧开始。
-        if (type <= 31 && nal.length > 2) {
-            boolean firstSlice = (nal[2] & 0x80) != 0;
-            if (firstSlice && !auNals.isEmpty()) submitAccessUnit();
+        if (type <= 31 && len > 2) {
+            boolean firstSlice = (b[off + 2] & 0x80) != 0;
+            if (firstSlice && auLen > 0) submitAccessUnit();
         }
-        auNals.add(nal);
+        appendNal(b, off, len);
+    }
+
+    /** 写 00 00 00 01 + NAL 数据进 AU 缓冲（不够就翻倍扩容，之后不再分配）。 */
+    private void appendNal(byte[] b, int off, int len) {
+        int need = auLen + 4 + len;
+        if (need > auBuf.length) {
+            int cap = auBuf.length;
+            while (cap < need) { cap <<= 1; }
+            byte[] nb = new byte[cap];
+            System.arraycopy(auBuf, 0, nb, 0, auLen);
+            auBuf = nb;
+        }
+        auBuf[auLen++] = 0; auBuf[auLen++] = 0; auBuf[auLen++] = 0; auBuf[auLen++] = 1;
+        System.arraycopy(b, off, auBuf, auLen, len);
+        auLen += len;
+    }
+
+    private void putFu(byte v) {
+        if (fuLen >= fuBuf.length) {
+            byte[] nb = new byte[fuBuf.length << 1];
+            System.arraycopy(fuBuf, 0, nb, 0, fuLen);
+            fuBuf = nb;
+        }
+        fuBuf[fuLen++] = v;
+    }
+
+    private void appendFu(byte[] b, int off, int len) {
+        int need = fuLen + len;
+        if (need > fuBuf.length) {
+            int cap = fuBuf.length;
+            while (cap < need) { cap <<= 1; }
+            byte[] nb = new byte[cap];
+            System.arraycopy(fuBuf, 0, nb, 0, fuLen);
+            fuBuf = nb;
+        }
+        System.arraycopy(b, off, fuBuf, fuLen, len);
+        fuLen += len;
+    }
+
+    private static byte[] copyOf(byte[] b, int off, int len) {
+        byte[] r = new byte[len];
+        System.arraycopy(b, off, r, 0, len);
+        return r;
     }
 
     /** 一个 AU 收齐 → 交给解码器。 */
     private void submitAccessUnit() {
-        if (auNals.isEmpty()) return;
+        if (auLen == 0) return;
         try {
             ensureCodec();
-            if (codec == null) { auNals.clear(); return; }
+            if (codec == null) { auLen = 0; return; }
 
-            int total = 0;
-            for (byte[] n : auNals) total += n.length + 4;
             int idx = codec.dequeueInputBuffer(10000);
-            if (idx < 0) { auNals.clear(); return; }
+            if (idx < 0) { auLen = 0; return; }
             ByteBuffer in = codec.getInputBuffer(idx);
-            if (in == null) { auNals.clear(); return; }
+            if (in == null) { auLen = 0; return; }
             in.clear();
-            for (byte[] n : auNals) {
-                in.put((byte) 0).put((byte) 0).put((byte) 0).put((byte) 1);
-                in.put(n);
-            }
-            int size = in.position();
+            in.put(auBuf, 0, auLen);
+            int size = auLen;
             in.flip();
             // 流里没有可用时间戳，自己按 30fps 递增
             long ptsUs = ptsCounter++ * 33333L;
             codec.queueInputBuffer(idx, 0, size, ptsUs, 0);
-            auNals.clear();
+            auLen = 0;
             frameCount++;
 
             drain();
         } catch (Throwable t) {
             Log.w(TAG, "submit: " + t);
-            auNals.clear();
+            auLen = 0;
         }
     }
 
@@ -597,7 +643,7 @@ public class Q07RtspPlayer {
             while (true) {
                 int idx = codec.dequeueOutputBuffer(info, 0);
                 if (idx < 0) return;
-                codec.releaseOutputBuffer(idx, true);
+                codec.releaseOutputBuffer(idx, renderOutput);
             }
         } catch (Throwable ignored) {
         }
@@ -608,6 +654,14 @@ public class Q07RtspPlayer {
         try {
             MediaFormat fmt = MediaFormat.createVideoFormat("video/hevc", width, height);
             fmt.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 2 * 1024 * 1024);
+            // 低功耗提示：这是侧摄像头（实时预览），告诉解码器别用高性能档。
+            // KEY_PRIORITY 0 = 实时；KEY_OPERATING_RATE 给真实帧率（30），
+            // 有些解码器（这台的 Hantro）据此选更省电的工作点。
+            try {
+                fmt.setInteger(MediaFormat.KEY_PRIORITY, 0);
+                fmt.setInteger(MediaFormat.KEY_OPERATING_RATE, 30);
+            } catch (Throwable ignored) {
+            }
             if (vps != null && sps != null && pps != null) {
                 ByteArrayOutputStream csd = new ByteArrayOutputStream();
                 csd.write(new byte[]{0, 0, 0, 1}); csd.write(vps);

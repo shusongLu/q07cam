@@ -157,6 +157,13 @@ public class OverlayService extends Service {
      * 留在原位用 alpha 隐藏，TextureView 一直在绘制、解码器不掉链子，显示即出画。
      */
     private static final float HIDDEN_ALPHA = 0.004f;
+    /**
+     * 隐藏那一路的渲染尺寸。目的只是"让它一直有人取帧"，好让解码器不掉链子；
+     * 画面大小无所谓 —— 所以缩到 64×36，GPU 合成成本几乎归零
+     * （隐藏在 1390×782 全尺寸时，光 RenderThread 就吃掉 7% 单核）。
+     * 显示时再恢复成摄像头窗口的实际大小。
+     */
+    private static final int HIDDEN_W = 64, HIDDEN_H = 36;
 
     private static class CamSide {
         View view;              // 容器（含 SurfaceView，编辑模式下带边框和缩放抓手）
@@ -246,7 +253,8 @@ public class OverlayService extends Service {
                 while (alive) {
                     boolean need = needTurn();
                     if (need) pollTurn();
-                    try { Thread.sleep(need ? 60L : 500L); } catch (InterruptedException e) { return; }
+                    // 60ms → 90ms：打灯发现延迟 +30ms 基本无感，但少了 1/3 的 HIDL 往返
+                    try { Thread.sleep(need ? 90L : 500L); } catch (InterruptedException e) { return; }
                 }
             }
         }, "q07-turn").start();
@@ -953,7 +961,8 @@ public class OverlayService extends Service {
             }
 
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                    camW, Math.max(dp(112), (int) (camW / CAM_ASPECT + 0.5f)),
+                    (pre && !editMode) ? HIDDEN_W : camW,
+                    (pre && !editMode) ? HIDDEN_H : Math.max(dp(112), (int) (camW / CAM_ASPECT + 0.5f)),
                     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                             | (editMode ? 0 : WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
@@ -982,6 +991,8 @@ public class OverlayService extends Service {
 
     private void moveSide(int idx, boolean onScreen) {
         CamSide s = sides[idx];
+        // 先按"是否在显示"决定这一侧要不要把解码结果画到 Surface 上（隐藏侧只解码不渲染）
+        if (s.player != null) { s.player.setRender(onScreen); }
         if (s.view == null || wm == null || s.onScreen == onScreen) return;
         try {
             WindowManager.LayoutParams lp = (WindowManager.LayoutParams) s.view.getLayoutParams();
@@ -990,12 +1001,17 @@ public class OverlayService extends Service {
                 lp.x = onScreen ? camX : OFFSCREEN_X;
                 lp.y = camY;
                 lp.alpha = 1f;
+                lp.width = camW;
+                lp.height = Math.max(dp(112), (int) (camW / CAM_ASPECT + 0.5f));
             } else {
-                // 正常使用：位置一直在摄像头该在的地方，只切透明度 ——
-                // 这样 TextureView 始终在绘制，解码器不会因缓冲队列没人取帧而停摆（移出屏幕才会）
+                // 正常使用：位置一直在摄像头该在的地方，只切透明度和尺寸 ——
+                // 隐藏时缩到 64×36：既保证 TextureView 仍在绘制（解码器不会被队列堵住），
+                // 又几乎不占 GPU 合成。
                 lp.x = camX;
                 lp.y = camY;
                 lp.alpha = onScreen ? 1f : HIDDEN_ALPHA;
+                lp.width = onScreen ? camW : HIDDEN_W;
+                lp.height = onScreen ? Math.max(dp(112), (int) (camW / CAM_ASPECT + 0.5f)) : HIDDEN_H;
             }
             wm.updateViewLayout(s.view, lp);
             s.onScreen = onScreen;
@@ -1014,6 +1030,7 @@ public class OverlayService extends Service {
         if (s.view == null) ensureSide(idx, (preMask & (1 << idx)) != 0);
         if (s.player == null) s.player = new Q07RtspPlayer(OverlayService.this, s.url);
         final Q07RtspPlayer p = s.player;
+        p.setRender(s.onScreen);   // 预连（隐藏）的那一侧只解码、不渲染
         camExec.execute(new Runnable() {
             @Override public void run() {
                 try {
