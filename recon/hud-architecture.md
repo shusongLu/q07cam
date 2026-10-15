@@ -158,7 +158,52 @@ CAR_ACCOMP_COND_NOT_MEET / CAR_ACCOMP_NO_SLOT / CAR_ACCOMP_SR_HUD_NOT_RENDER
 
 → **待验证**：HUD 导航模式打开时，Android 侧到底多了什么（新 display？新图层？新进程？新 type？）。
 
-## 4. 可行的替代
+## 6. ★ 决定性发现：HUD 的内容是「车机流过去的」
+
+实测（车机上 `ss -tni`）：
+
+```
+ESTAB  172.16.119.1:39192  →  172.16.119.2:10002
+  bytes_acked    : 2,385,123,738      (2.38 GB 已发)
+  bytes_received : 156                (对端几乎只回 ACK → 是个“接收端/显示端”)
+  segs_out       : 1,654,336          data_segs_out: 1,654,336
+  send 105.9Mbps  busy:252480ms  retrans:0/6730
+```
+
+* 车机侧接口：`eth0:2 = 172.16.119.1/24`；对端 `172.16.119.2` **活着**（ping 0.5ms），
+  MAC = `ca:ca:ca:23:04:02` → **一块独立设备**（HUD/仪表域）。
+* 发送方：导航服务的 native 地图引擎 `libMXNavi.so`
+  ```
+  service_map::CMapService::SendHUDData(char*, unsigned long const&)
+  easywsclient::WebSocket::dispatch<... SendHUDData ...>
+  ws://172.16.119.2:10002
+  WSCreatorProc RetryLeftTimes = %d
+  m_WebSocket->dispatch %s
+  ```
+  日志/符号里还有：`updateHudScreenshotOffset`、`lastHudDataSendTime`、`CalcDistancePerPixel`、
+  `CalcMapAnchor`、`CalcMapBoundary`、`SetAnchor`（AR/HUD 投影几何）。
+
+**结论**：**HUD 上的地图/SR 是导航进程（Android 里的 `com.incall.apps.navi.service`）渲染后
+通过 WebSocket 流到 172.16.119.2 显示的。** 即之前分析的 **N-1 成立**（Android 产出 HUD 内容）。
+
+→ 这跟领克的情况**结构一致**：**HUD 的内容由一个 Android 进程产出** ⇒ **可注入/可 hook**。
+（领克是注入地图进程画小地图；我们可以 hook 这个 HUD 输出帧，把摄像头画面合成上去。）
+
+### 现场阻塞：root 没了
+
+| 项 | 会话开头 | 现在 |
+|---|---|---|
+| 构建 | `...RD2A.211001.002 /**27**` | `...RD2A.211001.002 /**8**` |
+| `ro.debuggable` | 1 | **0** |
+| adb shell 身份 | `uid=0` (`u:r:su:s0`) | `uid=2000` (shell) |
+| `adb root` | 可用 | `adbd cannot run as root in production builds` |
+| `su` 二进制 | — | 不存在 |
+
+→ 没有 root 就 **tcpdump 抓不了包、也注入不了**。需要先把 root 恢复。
+
+---
+
+## 7. 可行的替代
 
 | 方案 | 说明 |
 |---|---|

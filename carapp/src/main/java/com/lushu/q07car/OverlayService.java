@@ -195,6 +195,10 @@ public class OverlayService extends Service {
                 soa = new SoaClient();
                 boolean ok = soa.init(OverlayService.this);
                 Log.i(TAG, "SOA init = " + ok);
+                // 实测：客户端侧 subscribeProperty 不推送（HAL 的通知只发给
+                // "服务端按名字订阅"的系统应用，日志里的 SoaBridge_Basc_*_Client 就是）。
+                // 因此维持轮询；enablePush()/subscribe() 代码保留，将来走 server 路径再用。
+                // if (ok) startPush();
             }
         }, "q07-soa").start();
 
@@ -214,12 +218,12 @@ public class OverlayService extends Service {
             }
         }, "q07-turn").start();
 
-        // 数据轮询也放后台：一次读 10 个属性约 200ms，跑在主线程会堵住界面节拍
+        // 数据轮询降为兜底（推送在跑时不靠它）；2 秒一轮足够
         new Thread(new Runnable() {
             @Override public void run() {
                 while (alive) {
                     poll();
-                    try { Thread.sleep(400L); } catch (InterruptedException e) { return; }
+                    try { Thread.sleep(2000L); } catch (InterruptedException e) { return; }
                 }
             }
         }, "q07-poll").start();
@@ -458,7 +462,7 @@ public class OverlayService extends Service {
     /** 把当前数据打包给 App 页面显示。 */
     private void publishLive() {
         liveRows = new String[]{
-                "实时功率|" + String.format(Locale.US, "%.1f kW", kwPdu),
+                "实时功率|" + String.format(Locale.US, "%.2f kW", kwPdu),
                 "高压电压|" + String.format(Locale.US, "%.0f V", hvVolt),
                 "母线电压|" + String.format(Locale.US, "%.1f V", pduVolt),
                 "电池电流|" + String.format(Locale.US, "%.1f A", pduCur),
@@ -473,33 +477,13 @@ public class OverlayService extends Service {
         };
     }
 
-    /** 只读转向灯，供高频线程调用。 */
+    /** 只读转向灯，供高频线程调用（推送在跑时直接跳过）。 */
     private void pollTurn() {
         if (soa == null) return;
+        // 推送活着就不轮询；10 秒没收到推送才退回轮询
+        if (lastPushAt > 0 && System.currentTimeMillis() - lastPushAt < 10000) return;
         try {
-            int[] a = soa.read(ID_TURN_LI);
-            if (a == null || a.length < 2) return;
-            long now = System.currentTimeMillis();
-            boolean l = a[0] != 0;
-            boolean r = a[1] != 0;
-            int before = curTurn;
-            if (l && r) {
-                // 左右同时亮：连读两次才认双闪（切换瞬间可能扫到一次）
-                if (++bothStreak >= 2) { curTurn = 3; curTurnAt = now; }
-            } else if (l) {
-                bothStreak = 0;
-                curTurn = 1;
-                curTurnAt = now;
-            } else if (r) {
-                bothStreak = 0;
-                curTurn = 2;
-                curTurnAt = now;
-            }
-            // 左右都不亮：不动 curTurn，靠保持窗口维持（转向灯是闪烁的）
-            if (curTurn != before && (curTurn == 1 || curTurn == 2)) {
-                turnSignalAt = now;
-                Log.i(TAG, "[cam] 收到转向信号: " + turnName(curTurn));
-            }
+            applyTurn(soa.read(ID_TURN_LI));
         } catch (Throwable ignored) {
         }
     }
@@ -513,7 +497,7 @@ public class OverlayService extends Service {
 
     private void render() {
         SpannableStringBuilder sb = new SpannableStringBuilder();
-        append(sb, String.format(Locale.US, "%.1f kW", kwPdu), 2.6f, 0xFF8AE234, true);
+        append(sb, String.format(Locale.US, "%.2f kW", kwPdu), 2.6f, 0xFF8AE234, true);
         append(sb, String.format(Locale.US, "\nPDU %.1fV × %.1fA（系数待标定）   ·   高压 %.0fV",
                 pduVolt, pduCur, hvVolt), 0.8f, 0xFF9ACD32, false);
         append(sb, String.format(Locale.US, "\n电量 %.0f%%   ·   续航 %.0f km   ·   总里程 %.0f km",
@@ -534,9 +518,9 @@ public class OverlayService extends Service {
         if (now - lastLogAt > 10000L) {
             lastLogAt = now;
             Log.i(TAG, String.format(Locale.US,
-                    "kw=%.1f pduV=%.1f pduI=%.1f hv=%.0f soc=%.0f range=%.0f odo=%.0f gear=%s spd=%.1f turn=%s",
+                    "kw=%.2f pduV=%.1f pduI=%.1f hv=%.0f soc=%.0f range=%.0f odo=%.0f gear=%s spd=%.1f turn=%s  [推送累计 %d]",
                     kwPdu, pduVolt, pduCur, hvVolt, socPct, rangeKm, totalKm,
-                    gearName(gear, gearInvalid), speed, turnName(turnState())));
+                    gearName(gear, gearInvalid), speed, turnName(turnState()), pushCount));
             for (int i = 0; i < 2; i++) {
                 CamSide cs = sides[i];
                 if (cs.player != null) {
@@ -584,6 +568,102 @@ public class OverlayService extends Service {
             case 2: return "右 ▶";
             case 3: return "双闪";
             default: return "关";
+        }
+    }
+
+    // ---------------------------------------------------------------- 推送（订阅）
+
+    private volatile long lastPushAt = 0;
+    private volatile long pushCount = 0;
+
+    private static final int[] SUBSCRIBE_IDS = {
+            ID_GEAR_POSN, ID_VEH_SPD, ID_POWER_SHIFT, ID_RESI_MILG, ID_TOTAL_MILG,
+            ID_BCU_OPER_PRM, ID_PT_LAMP, ID_PDU_OPER_PRM, ID_REEV_OPER, ID_TURN_LI,
+    };
+
+    /** 打开推送并订阅我们关心的属性（走厂商的 PropertyHalListener 回调）。 */
+    private void startPush() {
+        if (soa == null) return;
+        boolean ok = soa.enablePush(new SoaClient.OnProp() {
+            @Override public void onProp(int id, int[] value) {
+                try { applyProp(id, value); } catch (Throwable ignored) {}
+            }
+        });
+        if (!ok) return;
+        for (int id : SUBSCRIBE_IDS) soa.subscribe(id);
+        Log.i(TAG, "已订阅 " + SUBSCRIBE_IDS.length + " 个属性（有变化即时回调，轮询降为兜底）");
+    }
+
+    /** 推送回来的值：按 id 落到对应字段。 */
+    private void applyProp(int id, int[] a) {
+        if (a == null) return;
+        long now = System.currentTimeMillis();
+        lastPushAt = now;
+        lastPollOkAt = now;      // 推送活着也算健康
+        liveOk = true;
+        pushCount++;
+        switch (id) {
+            case ID_GEAR_POSN:
+                if (a.length >= 2) { gear = a[0]; gearInvalid = a[1]; }
+                break;
+            case ID_VEH_SPD:
+                if (a.length >= 1) speed = a[0] * SPEED_SCALE;
+                break;
+            case ID_POWER_SHIFT:
+                if (a.length >= 1) powerShift = a[0];
+                break;
+            case ID_RESI_MILG:
+                if (a.length >= 1) rangeKm = a[0];
+                break;
+            case ID_TOTAL_MILG:
+                if (a.length >= 1) totalKm = a[0];
+                break;
+            case ID_BCU_OPER_PRM:
+                if (a.length > 12) hvVolt = a[12];
+                break;
+            case ID_PT_LAMP:
+                if (a.length > 25) socPct = a[25];
+                break;
+            case ID_PDU_OPER_PRM:
+                if (a.length > 13) {
+                    pduVolt = a[8] / 10f;
+                    pduCur = a[0] * PDU_CURRENT_SCALE;
+                    kwPdu = pduVolt * pduCur / 1000f;
+                }
+                break;
+            case ID_REEV_OPER:
+                for (int i = 0; i < reev.length && i < a.length; i++) reev[i] = a[i];
+                break;
+            case ID_TURN_LI:
+                applyTurn(a);
+                break;
+            default:
+                break;
+        }
+        publishLive();
+    }
+
+    /** 转向灯状态机（轮询与推送共用）。 */
+    private void applyTurn(int[] a) {
+        if (a == null || a.length < 2) return;
+        long now = System.currentTimeMillis();
+        boolean l = a[0] != 0;
+        boolean r = a[1] != 0;
+        int before = curTurn;
+        if (l && r) {
+            if (++bothStreak >= 2) { curTurn = 3; curTurnAt = now; }
+        } else if (l) {
+            bothStreak = 0;
+            curTurn = 1;
+            curTurnAt = now;
+        } else if (r) {
+            bothStreak = 0;
+            curTurn = 2;
+            curTurnAt = now;
+        }
+        if (curTurn != before && (curTurn == 1 || curTurn == 2)) {
+            turnSignalAt = now;
+            Log.i(TAG, "[cam] 收到转向信号: " + turnName(curTurn) + (lastPushAt > 0 ? "（推送）" : ""));
         }
     }
 
