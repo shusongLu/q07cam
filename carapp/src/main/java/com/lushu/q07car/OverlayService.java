@@ -53,6 +53,7 @@ public class OverlayService extends Service {
     private static final int ID_TOTAL_MILG   = 0x00501000; // 总里程
     private static final int ID_REEV_OPER    = 0x00413072; // 增程器运行参数
     private static final int ID_ENG_THML     = 0x0041317B; // 发动机热管理 [8]=实际转速rpm [4]=目标转速 ★实车标定
+    private static final int ID_VCU_STS      = 0x00419310; // VCU状态 [0]=2充电/3放电 [21]=9充电/0放电 ★实车标定
     private static final int ID_TURN_LI      = 0x00415244; // 转向灯 [0]=左 [1]=右
 
     /** PDU[0] 量纲：×0.01 A（可用 /data/local/tmp/q07scale.txt 覆盖）。 */
@@ -99,6 +100,8 @@ public class OverlayService extends Service {
     private volatile int rpm = 0;
     /** 目标转速 rpm：0x0041317B[4]（熄火瞬间清零，随充电档位阶梯变化） */
     private volatile int rpmTarget = 0;
+    /** 电池是否在充电：0x00419310 [0]==2 或 [21]==9（充电）。两次实车实验一致。 */
+    private volatile boolean charging = false;
     private volatile int[] reev = new int[7];
     private volatile long lastLogAt = 0;
     /** 上次渲染的文本，没变就不 setText（减少重绘） */
@@ -447,10 +450,15 @@ public class OverlayService extends Service {
             if ((a = soa.read(ID_TOTAL_MILG)) != null && a.length >= 1) { totalKm = a[0]; any = true; }
             if ((a = soa.read(ID_BCU_OPER_PRM)) != null && a.length > 12) { hvVolt = a[12]; any = true; }
             if ((a = soa.read(ID_PT_LAMP)) != null && a.length > 25) { socPct = a[25]; any = true; }
+            if ((a = soa.read(ID_VCU_STS)) != null && a.length > 21) {
+                charging = (a[0] == 2 || a[21] == 9);
+                any = true;
+            }
             if ((a = soa.read(ID_PDU_OPER_PRM)) != null && a.length > 13) {
                 pduVolt = a[8] / 10f;
                 pduCur = a[0] * PDU_CURRENT_SCALE;
-                kwPdu = pduVolt * pduCur / 1000f;
+                float kw = pduVolt * pduCur / 1000f;
+                kwPdu = charging ? -kw : kw;   // 正 = 放电，负 = 充电
                 any = true;
             }
             if ((a = soa.read(ID_REEV_OPER)) != null) {
@@ -478,6 +486,7 @@ public class OverlayService extends Service {
     private void publishLive() {
         liveRows = new String[]{
                 "实时功率|" + String.format(Locale.US, "%.2f kW", kwPdu),
+                "充放电|" + (charging ? "充电中（发电/接桩）" : "放电中"),
                 "高压电压|" + String.format(Locale.US, "%.0f V", hvVolt),
                 "母线电压|" + String.format(Locale.US, "%.1f V", pduVolt),
                 "电池电流|" + String.format(Locale.US, "%.1f A", pduCur),
@@ -515,9 +524,11 @@ public class OverlayService extends Service {
 
     private void render() {
         SpannableStringBuilder sb = new SpannableStringBuilder();
-        append(sb, String.format(Locale.US, "%.2f kW", kwPdu), 2.6f, 0xFF8AE234, true);
-        append(sb, String.format(Locale.US, "\nPDU %.1fV × %.1fA（系数待标定）   ·   高压 %.0fV",
-                pduVolt, pduCur, hvVolt), 0.8f, 0xFF9ACD32, false);
+        append(sb, String.format(Locale.US, "%.2f kW", kwPdu), 2.6f,
+                charging ? 0xFF6EC6FF : 0xFF8AE234, true);
+        append(sb, String.format(Locale.US, "\n%s   ·   PDU %.1fV × %.1fA   ·   高压 %.0fV",
+                charging ? "充电中" : "放电中", pduVolt, pduCur, hvVolt),
+                0.8f, charging ? 0xFF6EC6FF : 0xFF9ACD32, false);
         append(sb, String.format(Locale.US, "\n电量 %.0f%%   ·   续航 %.0f km   ·   总里程 %.0f km",
                 socPct, rangeKm, totalKm), 1f, 0xFFE6EDF3, false);
         append(sb, String.format(Locale.US, "\n挡位 %s   ·   %.1f km/h   ·   电源 %s   ·   转向 %s",
