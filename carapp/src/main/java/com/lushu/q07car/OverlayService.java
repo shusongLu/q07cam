@@ -135,8 +135,10 @@ public class OverlayService extends Service {
 
     private final CamSide[] sides = new CamSide[]{new CamSide(), new CamSide()};
 
-    /** 预连掩码：bit0=左, bit1=右。 */
+    /** 预连掩码：bit0=左, bit1=右。默认双路（新服务端支持多客户端）。 */
     private volatile int preMask = 0;
+
+    public static final String PRE_DEFAULT = PRE_BOTH;
 
     @Override
     public IBinder onBind(Intent intent) { return null; }
@@ -692,10 +694,13 @@ public class OverlayService extends Service {
     /** 当前希望显示的那一侧（-1 表示无）。 */
     private volatile int curWant = -1;
 
-    /** 已经有 player 的一侧：re-PLAY 抢回发送口，不重连。 */
+    /** 已经有 player 的一侧：只要流还活着就**只移窗口**（零延迟、无黑屏）；
+     *  流真的断了才 re-PLAY 抢回发送口。 */
     private void resumeSide(final int idx) {
         final CamSide s = sides[idx];
         if (s.player == null || s.onScreen) return;
+        final long idle = System.currentTimeMillis() - s.player.lastRecv();
+        if (s.player.lastRecv() > 0 && idle < 2000) return;   // 一直在收流，直接显示即可
         camExec.execute(new Runnable() {
             @Override public void run() {
                 if (s.player.resume()) {

@@ -59,6 +59,29 @@ public class MainActivity extends Activity {
 
     private boolean darkNow;
 
+    /**
+     * 按屏幕宽度把整个界面等比放大。
+     *
+     * 车机是 2560×1600 但 density=160（1dp=1px），按平板调好的 dp/sp 尺寸会显得非常小。
+     * 这里通过覆盖 densityDpi 让所有 dp/sp/图标一次性放大，不用改任何布局代码。
+     */
+    @Override
+    protected void attachBaseContext(Context newBase) {
+        try {
+            Configuration cfg = new Configuration(newBase.getResources().getConfiguration());
+            int wDp = cfg.screenWidthDp > 0 ? cfg.screenWidthDp
+                    : newBase.getResources().getDisplayMetrics().widthPixels;
+            float scale = Math.max(1f, Math.min(2.4f, wDp / 1200f));
+            if (scale > 1.01f) {
+                cfg.densityDpi = (int) (cfg.densityDpi * scale + 0.5f);
+                super.attachBaseContext(newBase.createConfigurationContext(cfg));
+                return;
+            }
+        } catch (Throwable ignored) {
+        }
+        super.attachBaseContext(newBase);
+    }
+
     // Tab
     private static final String[] TABS = {"数据", "悬浮窗", "摄像头", "副驾屏", "设置"};
     private final LinearLayout[] pages = new LinearLayout[TABS.length];
@@ -282,8 +305,7 @@ public class MainActivity extends Activity {
     // ================================================================ 摄像头页
 
     private void buildCameraPage(LinearLayout page) {
-        LinearLayout sw = card(page, "开关");
-        Switch camSw = new Switch(this);
+        LinearLayout sw = card(page, "开关");        Switch camSw = new Switch(this);
         styleSwitch(camSw, "启用侧摄像头（打转向灯时显示）");
         camSw.setChecked(Prefs.getBool(this, Prefs.KEY_SHOW_CAMERA, true));
         camSw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
@@ -296,14 +318,15 @@ public class MainActivity extends Activity {
         note(sw, "关掉后打转向灯不会弹摄像头窗口（也不会去连 RTSP，省资源）。");
 
         LinearLayout cam = card(page, "侧摄像头预连");
-        note(cam, "预连 = 开机就把该侧 RTSP 拉起来常驻，打灯只把窗口移进来 → 基本零延迟。\n"
-                + "注意：服务端只有一路发送口，预连哪侧会把另一侧挤掉（切过去会慢一点）。");
+        note(cam, "实测：车机 RTSP 服务端（LIVE555）**支持多客户端同时收流**。\n"
+                + "所以「双路预连」是推荐档 —— 两路都在解码，打灯只把窗口移进来，切换秒出、不黑屏。\n"
+                + "代价：一直占两份解码和网络（车机上没压力）。");
 
-        final String[] keys = {OverlayService.PRE_NONE, OverlayService.PRE_LEFT,
-                OverlayService.PRE_RIGHT, OverlayService.PRE_BOTH};
-        final String[] labels = {"不预连（切换要重连）", "预连左侧", "预连右侧",
-                "双路预连（服务端只支持一路，多半无效）"};
-        String cur = Prefs.getStr(this, Prefs.KEY_PRECONNECT, OverlayService.PRE_NONE);
+        final String[] keys = {OverlayService.PRE_BOTH, OverlayService.PRE_NONE,
+                OverlayService.PRE_LEFT, OverlayService.PRE_RIGHT};
+        final String[] labels = {"双路预连（推荐：切换秒出、不黑）",
+                "不预连（切换要重连、会黑一下）", "只预连左侧", "只预连右侧"};
+        String cur = Prefs.getStr(this, Prefs.KEY_PRECONNECT, OverlayService.PRE_BOTH);
 
         final RadioGroup group = new RadioGroup(this);
         group.setOrientation(RadioGroup.VERTICAL);
