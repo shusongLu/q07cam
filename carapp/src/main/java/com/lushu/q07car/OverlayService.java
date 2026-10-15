@@ -148,6 +148,15 @@ public class OverlayService extends Service {
     private static final int SIDE_LEFT = 0;
     private static final int SIDE_RIGHT = 1;
     private static final int OFFSCREEN_X = -3000;
+    /**
+     * 预连那一路的"隐藏"方式：**不是移出屏幕，而是把窗口透明度调到几乎为 0**。
+     *
+     * 为什么不用 OFFSCREEN_X：画面现在是 TextureView 渲染的，窗口完全在屏幕外时
+     * 应用侧就不再绘制它 → SurfaceTexture 的缓冲队列没人取帧 → 解码器被队列堵住、
+     * 停止取输入 → 重新显示时要等下一个关键帧，肉眼就是"卡一秒"。
+     * 留在原位用 alpha 隐藏，TextureView 一直在绘制、解码器不掉链子，显示即出画。
+     */
+    private static final float HIDDEN_ALPHA = 0.004f;
 
     private static class CamSide {
         View view;              // 容器（含 SurfaceView，编辑模式下带边框和缩放抓手）
@@ -952,13 +961,20 @@ public class OverlayService extends Service {
                             | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                     PixelFormat.OPAQUE);
             lp.gravity = Gravity.TOP | Gravity.START;
-            lp.x = pre ? OFFSCREEN_X : camX;
-            lp.y = camY;
+            if (editMode) {
+                lp.x = pre ? OFFSCREEN_X : camX;   // 编辑模式：预连侧移出屏幕，避免两个窗口叠在一起不好拖
+                lp.y = camY;
+            } else {
+                lp.x = camX;                       // 正常使用：留在原位，靠透明度隐藏
+                lp.y = camY;
+                lp.alpha = pre ? HIDDEN_ALPHA : 1f;
+            }
             wm.addView(box, lp);
             s.view = box;
             s.url = urlOf(idx);
             s.onScreen = !pre;
-            Log.i(TAG, "[cam] 建窗口 " + (idx == SIDE_LEFT ? "左" : "右") + (pre ? "（预连，离屏）" : "")
+            Log.i(TAG, "[cam] 建窗口 " + (idx == SIDE_LEFT ? "左" : "右")
+                    + (pre ? (editMode ? "（预连，离屏）" : "（预连，透明隐藏）") : "")
                     + " " + camW + "x" + camH + " @" + lp.x + "," + lp.y);
         } catch (Throwable t) {
             Log.e(TAG, "[cam] ensureSide 失败: " + t);
@@ -970,11 +986,23 @@ public class OverlayService extends Service {
         if (s.view == null || wm == null || s.onScreen == onScreen) return;
         try {
             WindowManager.LayoutParams lp = (WindowManager.LayoutParams) s.view.getLayoutParams();
-            lp.x = onScreen ? camX : OFFSCREEN_X;
-            lp.y = camY;
+            if (editMode) {
+                // 编辑模式：预连侧移出屏幕（避免两窗重叠），但解码可能因此停摆 —— 只影响编辑时
+                lp.x = onScreen ? camX : OFFSCREEN_X;
+                lp.y = camY;
+                lp.alpha = 1f;
+            } else {
+                // 正常使用：位置一直在摄像头该在的地方，只切透明度 ——
+                // 这样 TextureView 始终在绘制，解码器不会因缓冲队列没人取帧而停摆（移出屏幕才会）
+                lp.x = camX;
+                lp.y = camY;
+                lp.alpha = onScreen ? 1f : HIDDEN_ALPHA;
+            }
             wm.updateViewLayout(s.view, lp);
             s.onScreen = onScreen;
-            Log.i(TAG, "[cam] " + (onScreen ? "显示 " : "收起 ") + (idx == SIDE_LEFT ? "左" : "右"));
+            long f = (s.player != null) ? s.player.frames() : -1;
+            Log.i(TAG, "[cam] " + (onScreen ? "显示 " : "隐藏 ")
+                    + (idx == SIDE_LEFT ? "左" : "右") + "  frames=" + f);
         } catch (Throwable t) {
             Log.e(TAG, "[cam] moveSide 失败: " + t);
         }
