@@ -397,9 +397,12 @@ public class MainActivity extends Activity {
         PackageManager pm = getPackageManager();
         java.util.List<ResolveInfo> apps = pm.queryIntentActivities(
                 new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0);
+        // 排序：用户安装的应用优先，然后按名称；系统应用排后面
         java.util.Collections.sort(apps, new java.util.Comparator<ResolveInfo>() {
-            @Override public int compare(ResolveInfo a, ResolveInfo b) {
-                return String.valueOf(a.loadLabel(pm)).compareToIgnoreCase(String.valueOf(b.loadLabel(pm)));
+            @Override public int compare(ResolveInfo x, ResolveInfo y) {
+                boolean ux = isUserApp(x), uy = isUserApp(y);
+                if (ux != uy) return ux ? -1 : 1;
+                return String.valueOf(x.loadLabel(pm)).compareToIgnoreCase(String.valueOf(y.loadLabel(pm)));
             }
         });
 
@@ -407,11 +410,17 @@ public class MainActivity extends Activity {
         final java.util.List<Display> finalTargets = targets;
         LinearLayout row = null;
         int shown = 0;
+        boolean sysHeaderAdded = false;
         for (final ResolveInfo ri : apps) {
             if (ri.activityInfo == null) continue;
             if (getPackageName().equals(ri.activityInfo.packageName)) continue;
-            if (shown >= 48) break;
-            if (shown % COLS == 0) {
+            if (shown >= 60) break;
+            if (!isUserApp(ri) && !sysHeaderAdded) {
+                sysHeaderAdded = true;
+                row = null;
+                note(grid, "以下为系统应用");
+            }
+            if (row == null) {
                 row = new LinearLayout(this);
                 row.setOrientation(LinearLayout.HORIZONTAL);
                 row.setPadding(0, dp(10), 0, 0);
@@ -419,8 +428,22 @@ public class MainActivity extends Activity {
             }
             row.addView(iconCell(ri, pm, finalTargets, target));
             shown++;
+            if (shown % COLS == 0) row = null;      // 满一行换行
         }
         if (shown == 0) note(grid, "没查到可启动的应用。");
+    }
+
+    /** 用户自己安装的应用（不含系统应用与"已被更新的系统应用"）。 */
+    private boolean isUserApp(ResolveInfo ri) {
+        try {
+            android.content.pm.ApplicationInfo ai = ri.activityInfo.applicationInfo;
+            if (ai == null) return false;
+            int sys = android.content.pm.ApplicationInfo.FLAG_SYSTEM
+                    | android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP;
+            return (ai.flags & sys) == 0;
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     private RadioGroup castGroup;
