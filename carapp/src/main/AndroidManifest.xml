@@ -35,7 +35,9 @@
         </activity>
 
         <!-- 长安开发者平台的 SDK 凭据。没有它 CaSdkManager.init() 会直接失败。
-             值由 build.gradle.kts 从 keystore.properties（已 gitignore）注入，不进仓库。 -->
+             值由 build.gradle.kts 从 keystore.properties（已 gitignore）注入，不进仓库。
+             注意官方文档要求：client id 是纯数字，**前面必须加 \ 强制按字符串处理**
+             （否则会被解析成数字，getString 读不到）。这个 \ 放在 keystore.properties 的值里。 -->
         <meta-data
             android:name="ca_dev_client_id"
             android:value="${caClientId}" />

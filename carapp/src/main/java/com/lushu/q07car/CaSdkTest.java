@@ -29,28 +29,53 @@ public class CaSdkTest {
      * 内容 = 车机实际支持的 module × service 全组合（尽量宽松，别把自己拦了）。
      */
     private static final String[] MODULES = {
-            "scene_brain_module", "virtual_vehicle", "vehicle_control",
-            "event_module", "net_setting", "audio_module", "phone_service", "phone_setting_service",
-            "business_forward", "gesture_module", "sub_state_module",
-            "maintenance_info", "message_box_moudle", "wearth_module", "wisdom_id", "schedule_remind",
-            "network_authorise", "music_light_component", "media_component", "cloud_service",
-            "vehicle_cloud", "interactive_light", "app_manager_module", "easter_egg_module",
-            "assist_service", "personalized_module", "app_module"
+            // 车控模块
+            "vehicle_control",
+            // 虚拟车模块（只读这些信号）
+            "virtual_vehicle",
+            "phone_service", "phone_setting_service", "audio_module",
+            // 系统设置模块
+            "net_setting",
+            // 长安云服务模块
+            "cloud_service",
+            "wisdom_id", "schedule_remind", "sub_state_module", "business_forward",
+            "event_module", "message_box_moudle", "network_authorise",
+            "voice_module", "navi_module",
+            // 应用管理（日志里出现过）
+            "app_manager_module", "app_module",
+            "scene_brain_module", "vehicle_cloud", "maintenance_info",
+            "interactive_light", "music_light_component", "media_component",
+            "gesture_module", "easter_egg_module", "assist_service", "personalized_module"
     };
 
+    /** 服务名按官方文档抄（虚拟车是 vehicle_service.<域> 这种两段式）。 */
     private static final String[] SERVICES = {
-            "config_service", "vehicle_service", "vehicle_drive_service", "drive_service",
-            "energy_recycler_service", "air_conditioner_service", "chair_service", "window_service",
-            "door_service", "lamp_service", "charge_service", "extr_service", "wiper_service",
-            "epb_service", "mileage_service", "environment_service", "car_body_hardware_service",
-            "braking_system_service", "steering_service", "suspension_control_service",
-            "aided_driving_service", "geek_space_service",
-            "business_forward_service", "arrange_scene_service", "enjoy_co_driver_service",
-            "vehicle_drive_scene_service", "vehicle_preset_scene_service",
-            "maintenance_info_service", "meter_service", "event_service", "weather_module",
-            "local_switch_service", "system_service", "net_authorise_service",
-            "phone_service", "phone_setting_service", "music_rhythm_service",
-            "app_manager_service", "app_store_service"
+            // 车控模块（vehicle_control）
+            "air_conditioner_service", "wiper_service", "charge_service", "epb_service",
+            "energy_recycler_service", "window_service", "lamp_service", "door_service",
+            "chair_service", "drive_service", "car_body_hardware_service",
+            "Steering_service", "suspension_control_service",
+            // 虚拟车模块（virtual_vehicle）—— 我们要的车速/挡位/灯/能量都在这里
+            "vehicle_service.airCondition", "vehicle_service.wiper", "vehicle_service.charge",
+            "vehicle_service.epb", "vehicle_service.energyRecycle", "vehicle_service.window",
+            "vehicle_service.light", "vehicle_service.door", "vehicle_service.chair",
+            "vehicle_service.drive", "vehicle_service.carBodyHardware", "vehicle_service.follow",
+            "vehicle_service.geek", "vehicle_service.suspension", "vehicle_service.aidedDrive",
+            "vehicle_service",
+            // 其它模块
+            "phone_service", "phone_setting_service", "sound_service",
+            "service_wifi", "service_wifi_ap", "Scene_service", "display_service",
+            "auto_brightness_service", "system_service",
+            "theme_business_service", "wallpaper_business_service", "theme_sound_business_service",
+            "stunt_sound_effect_business_service", "fragrance_business_service",
+            "accelerate_service", "avas_sound_business_service",
+            "user_info_service", "service_schedule", "sub_state_service",
+            "vehicle_preset_scene_service", "interactive_display_service", "day_night_service",
+            "arrange_scene_service", "enjoy_co_driver_service",
+            "meter_service", "event_service", "service_message", "net_authorise_service",
+            "voice_base_service", "navi_base_service",
+            "app_manager_service", "app_store_business_service", "config_service",
+            "maintenance_info_service", "local_switch_service"
     };
 
     private static void seedLocalApiList(Context ctx) {
@@ -103,7 +128,7 @@ public class CaSdkTest {
 
                     CaSdkManager m = CaSdkManager.getInstance();
                     Log.i(TAG, "[sdk] getInstance() ok，准备 init()");
-                    m.init(ctx, true);
+                    m.init(ctx, false);   // 官方文档写的是 false
                     Log.i(TAG, "[sdk] init() 返回，haveInit=" + m.haveInit());
                     Thread.sleep(2500);
                     boolean ok = m.haveInit();
@@ -114,22 +139,23 @@ public class CaSdkTest {
                         return;
                     }
 
-                    // ---- 用从车机日志里扒到的真实 模块/服务/方法 三元组 ----
-                    // 1) 车辆数据：virtual_vehicle / vehicle_service / getVirtualVehicle {"pkeys":[...]}
-                    probe(m, "virtual_vehicle", "vehicle_service", "getVirtualVehicle", null); // 空参先看默认
-                    probeKeys(m, new String[]{                        // 已知有效，用来验证链路
+                    // 用**官方文档**的服务名（虚拟车是两段式 vehicle_service.<域>）
+                    probeKeys(m, "vehicle_service.drive", new String[]{   // 文档：车速/挡位/里程/轮胎
                             "vehicle.drive.flTireState", "vehicle.drive.frTireState",
                             "vehicle.drive.lrTireState", "vehicle.drive.rrTireState"});
-                    probeKeys(m, new String[]{                        // 空数组：看能不能全量返回
-                    });
-                    probeKeys(m, new String[]{                        // 猜几个我们要的键
-                            "vehicle.drive.gearLevel", "vehicle.drive.vehicleSpeed",
-                            "vehicle.drive.speed", "vehicle.drive.powerShift",
-                            "vehicle.energy.soc", "vehicle.energyRecycle.tripEnergyConsume"});
-                    // 2) 应用列表（跟安装/自启那两块痛点相关）
+                    probeKeys(m, "vehicle_service.drive", new String[]{}); // 空：看能否全量返回
+                    probeKeys(m, "vehicle_service.drive", new String[]{   // 猜我们要的
+                            "vehicle.drive.speed", "vehicle.drive.vehicleSpeed",
+                            "vehicle.drive.gearLevel", "vehicle.drive.gearPosition",
+                            "vehicle.drive.powerShift", "vehicle.drive.totalMileage"});
+                    probeKeys(m, "vehicle_service.light", new String[]{   // 文档：转弯灯在这
+                            "vehicle.light.turnLight", "vehicle.light.turnLightState",
+                            "vehicle.light.leftTurnLight", "vehicle.light.hazardLamp"});
+                    probeKeys(m, "vehicle_service.energyRecycle", new String[]{
+                            "vehicle.energyRecycle.soc", "vehicle.energyRecycle.batteryLevel",
+                            "vehicle.energyRecycle.tripEnergyConsume"});
+                    // 应用列表（安装/自启那两块痛点）
                     probe(m, "app_manager_module", "app_manager_service", "get_app_list", null);
-                    // 3) 系统配置
-                    probe(m, "net_setting", "system_service", "get_system_configuration_parameter", null);
                 } catch (Throwable t) {
                     Log.e(TAG, "[sdk] 异常: " + t, t);
                 }
@@ -138,10 +164,10 @@ public class CaSdkTest {
     }
 
     /** 用 pkeys 查车辆数据（车机自己的调用就是这么发的）。 */
-    private static void probeKeys(CaSdkManager m, String[] keys) {
+    private static void probeKeys(CaSdkManager m, String svc, String[] keys) {
         java.util.Map<String, Object> p = new java.util.HashMap<>();
         p.put("pkeys", new java.util.ArrayList<>(java.util.Arrays.asList(keys)));
-        probe(m, "virtual_vehicle", "vehicle_service", "getVirtualVehicle", p);
+        probe(m, "virtual_vehicle", svc, "getVirtualVehicle", p);
     }
 
     private static void probe(CaSdkManager m, String cap, String svc, String method,

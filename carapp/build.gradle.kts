@@ -39,15 +39,19 @@ android {
 
         // 长安开发者平台的凭据从 keystore.properties 注入（该文件已在 .gitignore 里），
         // 避免把 client secret 提交到公开仓库。
-        // 正式/pre 两套：SDK 会读 Settings.Global 的 ENVI_NET 决定用哪套
+        // 注意官方文档：ca_dev_client_id 是纯数字，**必须在前面加 \ 强制按字符串处理**，
+        // 否则会被解析成数字、SDK 的 getString 读不到。这里统一拼一个反斜杠。
+        // 正式/pre 两套由 SDK 依据 Settings.Global 的 ENVI_NET 选择
         // （==1 走正式 https://huappDomain；≠1 走预发 http://pre-huapp.sda.changan.com.cn）。
-        // 这份 developer_ca 是开发者版，正式域名还是占位，所以要走预发。
-        manifestPlaceholders["caClientId"] = keystoreProps.getProperty("caClientId") ?: "guest"
+        manifestPlaceholders["caClientId"] =
+            "\\" + (keystoreProps.getProperty("caClientId") ?: "guest")
         manifestPlaceholders["caClientSecret"] = keystoreProps.getProperty("caClientSecret") ?: "guest"
         manifestPlaceholders["preCaClientId"] =
-            keystoreProps.getProperty("preCaClientId") ?: keystoreProps.getProperty("caClientId") ?: "guest"
+            "\\" + (keystoreProps.getProperty("preCaClientId")
+                    ?: keystoreProps.getProperty("caClientId") ?: "guest")
         manifestPlaceholders["preCaClientSecret"] =
-            keystoreProps.getProperty("preCaClientSecret") ?: keystoreProps.getProperty("caClientSecret") ?: "guest"
+            keystoreProps.getProperty("preCaClientSecret")
+                    ?: keystoreProps.getProperty("caClientSecret") ?: "guest"
     }
 
     signingConfigs {
