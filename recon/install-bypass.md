@@ -195,3 +195,85 @@ Issuer : C=CN, O=CHA CA,  CN=CHANGAN Services CA
 4. **已经把 APK 装进去了**：把包名改成 `de.dsa.ford.otaflash`（白名单第二位，未安装）即 `Success`。
 5. 要装任意包名，只能改 `ext.jar`（详见第 4 节）。
 6. **应用商店的「内测应用」能装，是因为长安服务端用 `APPCHANGAN_RSA2048` 私钥给每个 APK 签了 `signed`**（签的是 APK 哈希，与 APK 自身签名无关）；证书/私钥不在车上，伪造不了 → 商店是**发布渠道**，不是绕过手段。
+
+---
+
+## 附：一个害人的坑 —— `am force-stop` 会让"开机自启"看起来失效
+
+### 现象
+
+开机后 App 不自动启动，但 `BootReceiver`、权限、服务代码全都正常：
+
+```
+requested permissions: ... android.permission.RECEIVE_BOOT_COMPLETED
+install permissions:   RECEIVE_BOOT_COMPLETED: granted=true
+Receiver Resolver Table: .../com.lushu.q07car.BootReceiver
+    Action: "android.intent.action.BOOT_COMPLETED"
+```
+
+### 根因
+
+AMS 投递广播时会跳过 **stopped 状态** 的包
+（除非 intent 带 `FLAG_INCLUDE_STOPPED_PACKAGES`，而系统的 BOOT_COMPLETED 不带）：
+
+```java
+// ActivityManagerService.broadcastIntentLocked
+if (pkg.isStopped() && !intent.hasFlag(FLAG_INCLUDE_STOPPED_PACKAGES)) continue;
+```
+
+而 **`adb shell am force-stop <pkg>` 会把包置为 `stopped=true`**；
+新安装的应用**默认也是 stopped**（直到用户从桌面正常启动一次）。
+
+所以：**每次装完 APK 就 force-stop 一下** → 应用停在 stopped 状态 →
+下次开机系统**根本不发 BOOT_COMPLETED** → 看起来像"自启动坏了"。
+
+### 怎么判断
+
+```bash
+adb shell dumpsys package <pkg> | grep "User 0:"
+# stopped=true   ← 就是它
+```
+
+### 正确的部署流程（别再 force-stop）
+
+```bash
+adb install -r carapp-release.apk
+# 安装会杀掉旧进程，并自动投递 MY_PACKAGE_REPLACED
+# → BootReceiver 收到 → startForegroundService → 服务用新代码自启
+# 日志：Q07Car: boot(android.intent.action.MY_PACKAGE_REPLACED): 已拉起 OverlayService
+```
+
+若已经变成 `stopped=true`，**正常启动一次即可清除**：
+
+```bash
+adb shell am start -n <pkg>/com.lushu.q07car.MainActivity
+```
+
+或者用带 `--include-stopped-packages` 的广播临时验证 Receiver：
+
+```bash
+adb shell am broadcast -a android.intent.action.QUICKBOOT_POWERON -p <pkg> --include-stopped-packages
+```
+
+### 另外注意
+
+- `BOOT_COMPLETED` 是受保护广播，`am broadcast` 发不出去
+  （`SecurityException: not allowed to send broadcast ... from uid=2000`），这是正常的。
+- `LOCKED_BOOT_COMPLETED` 只有在 receiver 声明 `android:directBootAware="true"` 时才有效，
+  否则该 action 是惰性的（不影响 `BOOT_COMPLETED`）。
+- 无线 ADB 想活过重启，必须设 **`persist.adb.tcp.port`**
+  （`service.adb.tcp.port` 是非持久属性，重启就丢）：
+
+  ```bash
+  adb shell setprop persist.adb.tcp.port 5555
+  ```
+
+### 实车验证记录（2026-10-15）
+
+| 操作 | 结果 |
+|---|---|
+| `am force-stop` 后 `dumpsys package` | `stopped=true` |
+| `am broadcast -a QUICKBOOT_POWERON -p <pkg> --include-stopped-packages` | 服务被拉起；`stopped` 变 `false`；日志 `boot(...): 已拉起 OverlayService` |
+| `adb install -r`（**不** force-stop） | 系统自动投递 `MY_PACKAGE_REPLACED` → 服务用新代码自启 ✓ |
+| `am broadcast -a BOOT_COMPLETED` | `SecurityException`（受保护，预期） |
+
