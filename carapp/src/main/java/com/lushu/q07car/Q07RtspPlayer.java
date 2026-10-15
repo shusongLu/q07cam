@@ -70,6 +70,9 @@ public class Q07RtspPlayer {
     private String sessionId;
     private int cseq = 1;
     private int rtpPayloadType = 127;
+    /** 从 SDP/响应里解析：内容基地址 与 轨道控制名（服务端会变，不能写死）。 */
+    private String contentBase;
+    private String trackControl;
 
     public Q07RtspPlayer(Context ctx, String url) {
         this.appCtx = ctx;
@@ -183,9 +186,12 @@ public class Q07RtspPlayer {
             bindToNetwork(net, rtcpSock);
             rtpSock.setSoTimeout(1000);
 
-            String setupResp = rtsp("SETUP", base + "/track0",
+            String setupResp = rtsp("SETUP", trackUrl(base),
                     "Transport: RTP/AVP;unicast;client_port=" + rtpPort + "-" + (rtpPort + 1));
             sessionId = headerValue(setupResp, "Session");
+            if (sessionId == null) {
+                Log.e(TAG, "SETUP 没拿到 Session：" + setupResp.replace("\r\n", " | "));
+            }
             rtsp("PLAY", base, "Session: " + sessionId);
 
             rtpThread = new Thread(new Runnable() {
@@ -308,15 +314,24 @@ public class Q07RtspPlayer {
         return semi >= 0 ? v.substring(0, semi).trim() : v;
     }
 
-    /** 从 SDP 里取 payload type / 分辨率 / sprop 参数集。 */
-    private void parseSdp(String sdp) {
-        for (String line : sdp.split("\r\n")) {
+    /** 从 SDP / 响应头里取 payload type、内容基地址、轨道控制名、sprop 参数集。 */
+    private void parseSdp(String resp) {
+        String cb = headerValue(resp, "Content-Base");
+        if (cb != null) contentBase = cb;
+
+        boolean inMedia = false;
+        for (String line : resp.split("\r\n")) {
             try {
                 if (line.startsWith("m=video")) {
+                    inMedia = true;
                     String[] p = line.trim().split("\\s+");
                     if (p.length >= 4) rtpPayloadType = Integer.parseInt(p[3]);
+                } else if (line.startsWith("a=control:")) {
+                    String c = line.substring("a=control:".length()).trim();
+                    if (inMedia && !"*".equals(c)) {
+                        trackControl = c;          // 媒体段的 control 才是轨道地址
+                    }
                 } else if (line.startsWith("a=fmtp:")) {
-                    // a=fmtp:127 sprop-vps=...;sprop-sps=...;sprop-pps=...
                     for (String kv : line.substring(line.indexOf(':') + 1).split(";")) {
                         kv = kv.trim();
                         int eq = kv.indexOf('=');
@@ -331,8 +346,20 @@ public class Q07RtspPlayer {
             } catch (Throwable ignored) {
             }
         }
-        Log.i(TAG, "payloadType=" + rtpPayloadType + " sprop(vps/sps/pps)="
-                + (vps != null) + "/" + (sps != null) + "/" + (pps != null));
+        Log.i(TAG, "payloadType=" + rtpPayloadType + "  contentBase=" + contentBase
+                + "  track=" + trackControl
+                + "  sprop(vps/sps/pps)=" + (vps != null) + "/" + (sps != null) + "/" + (pps != null));
+    }
+
+    /** 拼出 SETUP 用的轨道地址（相对 Content-Base 或绝对）。 */
+    private String trackUrl(String base) {
+        String c = trackControl;
+        if (c == null || c.isEmpty()) c = "track1";        // 兜底
+        if (c.startsWith("rtsp://")) return c;
+        String b = contentBase;
+        if (b == null || b.isEmpty()) b = base.endsWith("/") ? base : base + "/";
+        if (!b.endsWith("/")) b = b + "/";
+        return b + c;
     }
 
     private static byte[] hexToBytes(String s) {
