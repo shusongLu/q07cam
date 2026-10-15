@@ -172,27 +172,34 @@ public class MainActivity extends Activity {
         setContentView(rootAll);
         switchTab(0);
 
-        ui.post(new Runnable() {
-            @Override public void run() {
-                refreshLive();
-                refresh();
-                ui.postDelayed(this, 500L);
-            }
-        });
+        // 注意：刷新循环只在界面可见时跑（见 onResume/onPause）。
+        // 之前是在这里挂了个 500ms 死循环，退到后台也一直跑，白烧 CPU + 一直重建视图。
     }
+
+    /** 界面可见时才跑的 500ms 刷新循环。 */
+    private final Runnable tick = new Runnable() {
+        @Override public void run() {
+            refreshLive();
+            refresh();
+            ui.postDelayed(this, 500L);
+        }
+    };
 
     @Override
     protected void onResume() {
         super.onResume();
         // 告诉服务：主界面在前台 → 需要完整数据（低功耗模式下会跳过 SOA 轮询）
         OverlayService.setUiForeground(true);
-        refresh();
+        overlayOk = checkOverlay();
+        ui.removeCallbacks(tick);
+        ui.post(tick);
     }
 
     @Override
     protected void onPause() {
         super.onPause();
         OverlayService.setUiForeground(false);
+        ui.removeCallbacks(tick);        // 界面不可见就别刷了
     }
 
     private void switchTab(int idx) {
@@ -1062,55 +1069,90 @@ public class MainActivity extends Activity {
         }, 700L);
     }
 
+    /** 悬浮窗权限（查询是 IPC，缓存起来，别每 500ms 问一次）。 */
+    private boolean overlayOk = false;
+
+    private boolean checkOverlay() {
+        try { return Settings.canDrawOverlays(this); } catch (Throwable t) { return false; }
+    }
+
     private void refresh() {
-        boolean overlay = false;
-        try { overlay = Settings.canDrawOverlays(this); } catch (Throwable ignored) {}
         boolean running = OverlayService.running;
         boolean edit = Prefs.getBool(this, Prefs.KEY_EDIT, false);
         if (status != null) {
-            status.setText("悬浮窗服务    " + (running ? "● 运行中" : "○ 已停止")
-                    + "\n悬浮窗权限    " + (overlay ? "● 已授予" : "● 未授予（不授予面板不显示）")
+            String s = "悬浮窗服务    " + (running ? "● 运行中" : "○ 已停止")
+                    + "\n悬浮窗权限    " + (overlayOk ? "● 已授予" : "● 未授予（不授予面板不显示）")
                     + "\n编辑模式      " + (edit ? "● 开" : "○ 关")
-                    + "\n包名          " + getPackageName());
+                    + "\n包名          " + getPackageName();
+            // 文本没变就别 setText —— 否则每 500ms 都会重新布局一次
+            if (!s.contentEquals(status.getText())) status.setText(s);
         }
     }
+
+    /** 实时数据那几行的"值"TextView —— 建一次，之后只改文本（不再每 500ms 重建十几个 View）。 */
+    private final java.util.List<TextView> liveVals = new java.util.ArrayList<>();
 
     private void refreshLive() {
         if (liveBox == null) return;
         String[] rows = OverlayService.liveRows;
         boolean ok = OverlayService.liveOk;
         if (!ok || rows == null || rows.length == 0) {
-            liveHint.setText("暂无数据 —— 悬浮窗服务未运行，或本机不是车机（读不到 SOA）。");
-            if (liveBox.getChildCount() != 0) liveBox.removeAllViews();
-            liveKey = "";
+            if (liveHint != null) {
+                String h = "暂无数据 —— 悬浮窗服务未运行，或本机不是车机（读不到 SOA）。";
+                if (!h.contentEquals(liveHint.getText())) liveHint.setText(h);
+            }
+            if (liveBox.getChildCount() != 0) {
+                liveBox.removeAllViews();
+                liveVals.clear();
+                liveKey = "";
+            }
             return;
         }
-        liveHint.setText("来自厂商 SOA（每 0.4 秒刷新）");
-        StringBuilder key = new StringBuilder();
-        for (String r : rows) key.append(r).append(';');
-        if (key.toString().equals(liveKey)) return;
-        liveKey = key.toString();
-        liveBox.removeAllViews();
+        if (liveHint != null) {
+            String h = "来自厂商 SOA";
+            if (!h.contentEquals(liveHint.getText())) liveHint.setText(h);
+        }
+
+        // 只有"标签集合"变了才重建视图树；平时只改值文本。
+        StringBuilder labels = new StringBuilder();
         for (String r : rows) {
             int i = r.indexOf('|');
-            if (i < 0) continue;
-            LinearLayout line = new LinearLayout(this);
-            line.setOrientation(LinearLayout.HORIZONTAL);
-            line.setPadding(0, dp(5), 0, dp(5));
-            TextView k = new TextView(this);
-            k.setText(r.substring(0, i));
-            k.setTextSize(14f);
-            k.setTextColor(cSub);
-            k.setLayoutParams(new LinearLayout.LayoutParams(0,
-                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-            line.addView(k);
-            TextView v = new TextView(this);
-            v.setText(r.substring(i + 1));
-            v.setTextSize(15f);
-            v.setTypeface(null, Typeface.BOLD);
-            v.setTextColor(cAccent);
-            line.addView(v);
-            liveBox.addView(line);
+            labels.append(i < 0 ? r : r.substring(0, i)).append(';');
+        }
+        if (!labels.toString().equals(liveKey)) {
+            liveKey = labels.toString();
+            liveBox.removeAllViews();
+            liveVals.clear();
+            for (String r : rows) {
+                int i = r.indexOf('|');
+                if (i < 0) continue;
+                LinearLayout line = new LinearLayout(this);
+                line.setOrientation(LinearLayout.HORIZONTAL);
+                line.setPadding(0, dp(5), 0, dp(5));
+                TextView k = new TextView(this);
+                k.setText(r.substring(0, i));
+                k.setTextSize(14f);
+                k.setTextColor(cSub);
+                k.setLayoutParams(new LinearLayout.LayoutParams(0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                line.addView(k);
+                TextView v = new TextView(this);
+                v.setTextSize(15f);
+                v.setTypeface(null, Typeface.BOLD);
+                v.setTextColor(cAccent);
+                line.addView(v);
+                liveVals.add(v);
+                liveBox.addView(line);
+            }
+        }
+        int n = Math.min(liveVals.size(), rows.length);
+        for (int i = 0; i < n; i++) {
+            String r = rows[i];
+            int p = r.indexOf('|');
+            if (p < 0) continue;
+            String val = r.substring(p + 1);
+            TextView tv = liveVals.get(i);
+            if (!val.contentEquals(tv.getText())) tv.setText(val);
         }
     }
 
