@@ -172,8 +172,10 @@ public class MainActivity extends Activity {
         setContentView(rootAll);
         switchTab(0);
 
-        // 长安官方 SDK 接入探测（默认关闭，见 CaSdkTest.ENABLED 的说明）
+        // 长安 SDK：先走官方客户端 init（它那条 get_config_info 是成功的），
+        // 再直连系统服务调用 —— 顺序可能是授权关键
         if (CaSdkTest.ENABLED) CaSdkTest.runOnce(this);
+        CaSdkDirect.runOnce(this);
 
         // 注意：刷新循环只在界面可见时跑（见 onResume/onPause）。
         // 之前是在这里挂了个 500ms 死循环，退到后台也一直跑，白烧 CPU + 一直重建视图。
