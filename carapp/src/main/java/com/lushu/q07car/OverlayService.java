@@ -71,6 +71,8 @@ public class OverlayService extends Service {
     /** 编辑模式下的抓手尺寸 */
     private static final int HANDLE_DP = 44;
     private static final int BORDER_DP = 3;
+    /** 侧摄像头画面是 1920×1080，窗口锁 16:9，缩放时不拉伸。 */
+    private static final float CAM_ASPECT = 16f / 9f;
 
     private static final String RTSP_LEFT = "rtsp://172.16.6.26:8888/lt";
     private static final String RTSP_RIGHT = "rtsp://172.16.6.26:8888/rt";
@@ -371,8 +373,9 @@ public class OverlayService extends Service {
                     startH = lp.height;
                     return true;
                 case MotionEvent.ACTION_MOVE:
-                    int w = Math.max(dp(160), startW + (int) (e.getRawX() - downX));
-                    int h = Math.max(dp(90), startH + (int) (e.getRawY() - downY));
+                    int w = Math.max(dp(200), startW + (int) (e.getRawX() - downX));
+                    // 锁 16:9：只按宽度算高度，画面不拉伸
+                    int h = Math.max(dp(112), (int) (w / CAM_ASPECT + 0.5f));
                     lp.width = w;
                     lp.height = h;
                     try { wm.updateViewLayout(box, lp); } catch (Throwable ignored) {}
@@ -766,7 +769,7 @@ public class OverlayService extends Service {
             }
 
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                    camW, camH,
+                    camW, Math.max(dp(112), (int) (camW / CAM_ASPECT + 0.5f)),
                     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                             | (editMode ? 0 : WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
