@@ -58,8 +58,13 @@ public class OverlayService extends Service {
     private static volatile float PDU_CURRENT_SCALE = 0.01f;
     private static final float SPEED_SCALE = 0.1f;
 
-    /** 转向灯保持窗口（去闪烁）。 */
+    /** 转向灯保持窗口（去闪烁）：自适应，取实测闪烁周期的 1.7 倍，钳制在 [900, 2500]ms。 */
     private static final long TURN_HOLD_MS = 2500L;
+    private static final long TURN_HOLD_MIN_MS = 900L;
+    /** 实测的闪烁周期（两次"亮"之间的间隔），初值按 800ms 估。 */
+    private volatile long flashInterval = 800L;
+    private volatile long lastOnEdgeAt = 0L;
+    private volatile boolean prevL = false, prevR = false;
 
     // 面板 / 摄像头窗口的位置大小改为从 Prefs 读取（可由 App 界面编辑）
     private int panelX, panelY, panelW, panelH;
@@ -488,9 +493,10 @@ public class OverlayService extends Service {
         }
     }
 
-    /** 0 关 1 左 2 右 3 双闪（保持窗口消除闪烁） */
+    /** 0 关 1 左 2 右 3 双闪（保持窗口按实测闪烁周期自适应，灯灭后尽快收起） */
     private int turnState() {
-        return (System.currentTimeMillis() - curTurnAt < TURN_HOLD_MS) ? curTurn : 0;
+        long hold = Math.max(TURN_HOLD_MIN_MS, Math.min(TURN_HOLD_MS, (long) (flashInterval * 1.7)));
+        return (System.currentTimeMillis() - curTurnAt < hold) ? curTurn : 0;
     }
 
     // ---------------------------------------------------------------- 渲染
@@ -649,6 +655,18 @@ public class OverlayService extends Service {
         long now = System.currentTimeMillis();
         boolean l = a[0] != 0;
         boolean r = a[1] != 0;
+
+        // 记录"亮"的上升沿间隔，用于估计闪烁周期（自适应保持窗口）
+        if ((l && !prevL) || (r && !prevR)) {
+            if (lastOnEdgeAt > 0) {
+                long d = now - lastOnEdgeAt;
+                if (d > 200 && d < 4000) flashInterval = d;
+            }
+            lastOnEdgeAt = now;
+        }
+        prevL = l;
+        prevR = r;
+
         int before = curTurn;
         if (l && r) {
             if (++bothStreak >= 2) { curTurn = 3; curTurnAt = now; }
