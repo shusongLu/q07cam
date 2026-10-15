@@ -653,7 +653,10 @@ public class Q07RtspPlayer {
         if (codec != null) return;
         try {
             MediaFormat fmt = MediaFormat.createVideoFormat("video/hevc", width, height);
-            fmt.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 2 * 1024 * 1024);
+            // 只要"一帧编码数据"放得下即可：1080p H.265 一帧通常几十 KB，
+            // 512KB 已有 4~5 倍余量。原来写 2MB，解码器会按它分配输入缓冲，
+            // 白白多占私有内存（实测 native heap 25MB 里有一大块是这个）。
+            fmt.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 512 * 1024);
             // 低功耗提示：这是侧摄像头（实时预览），告诉解码器别用高性能档。
             // KEY_PRIORITY 0 = 实时；KEY_OPERATING_RATE 给真实帧率（30），
             // 有些解码器（这台的 Hantro）据此选更省电的工作点。
