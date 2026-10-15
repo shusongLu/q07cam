@@ -796,20 +796,19 @@ public class OverlayService extends Service {
             }, "q07-soa-retry").start();
         }
 
-        // 2) 摄像头：正在显示的那一侧 5 秒收不到包就重连
+        // 2) 摄像头：任一侧（含预连隐藏的那侧）5 秒收不到包就重连。
+        //    隐藏那侧掉流时用户看不出来，等打灯才开始重连就是"卡一下"，所以要提前修好。
         if (showCamera) {
-            int want = wantedSide();
-            if (want >= 0) {
-                CamSide s = sides[want];
-                if (s.player != null && s.onScreen) {
-                    long idle = now - s.player.lastRecv();
-                    if (s.player.lastRecv() > 0 && idle > 5000 && now - lastCamRetryAt > 8000) {
-                        lastCamRetryAt = now;
-                        Log.w(TAG, "[wd] 摄像头 " + (want == SIDE_LEFT ? "左" : "右")
-                                + " 已 " + idle + "ms 无数据，重连");
-                        stopPlayer(want);
-                        startSide(want);
-                    }
+            for (int i = 0; i < 2; i++) {
+                CamSide s = sides[i];
+                if (s.player == null || s.view == null) { continue; }
+                long idle = now - s.player.lastRecv();
+                if (s.player.lastRecv() > 0 && idle > 5000 && now - lastCamRetryAt > 8000) {
+                    lastCamRetryAt = now;
+                    Log.w(TAG, "[wd] 摄像头 " + (i == SIDE_LEFT ? "左" : "右") + " 已 " + idle
+                            + "ms 无数据（" + (s.onScreen ? "显示中" : "隐藏中") + "），重连");
+                    stopPlayer(i);
+                    startSide(i);
                 }
             }
         }

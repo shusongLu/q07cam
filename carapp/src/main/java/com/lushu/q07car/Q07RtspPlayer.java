@@ -199,6 +199,8 @@ public class Q07RtspPlayer {
             }, "q07-rtp");
             rtpThread.start();
 
+            startKeepAlive();
+
             playing = true;
             Log.i(TAG, "start " + base + "  rtpPort=" + rtpPort + "  session=" + sessionId);
         } catch (Throwable t) {
@@ -211,7 +213,7 @@ public class Q07RtspPlayer {
      * 重新 PLAY（不重连）。服务端只有一把 RTP 发送口，谁后 PLAY 谁独占 ——
      * 切回来时只要 re-PLAY 就能把发送口抢回来，比重新连接快得多。
      */
-    public boolean resume() {
+    public synchronized boolean resume() {
         try {
             if (ctrl == null || sessionId == null) return false;
             playing = false;
@@ -228,9 +230,67 @@ public class Q07RtspPlayer {
         }
     }
 
+    // ---------------------------------------------------------------- 会话保活
+
+    /**
+     * LIVE555 的 RTSP 会话有"客户端存活检测"（默认约 65 秒）：我们既不发 RTCP RR、
+     * 也不发任何 RTSP 请求的话，服务端会回收会话 —— 之后 re-PLAY 会拿到
+     * "454 Session Not Found"，只能整条重连，肉眼就是"打灯先卡一下"。
+     *
+     * 所以每 20 秒发一次带 Session 的 OPTIONS 续命。与 start/stop/resume 共用
+     * 同一把锁（它们都是 synchronized），避免读响应时互相抢包。
+     */
+    private Thread keepAliveThread;
+    /** 成功保活几次（只打前几条日志，避免刷屏）。 */
+    private int kaOk = 0;
+
+    private void startKeepAlive() {
+        stopKeepAlive();
+        keepAliveThread = new Thread(new Runnable() {
+            @Override public void run() {
+                while (running && playing) {
+                    try {
+                        Thread.sleep(20000L);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                    if (!running || !playing) { return; }
+                    synchronized (Q07RtspPlayer.this) {
+                        if (ctrl == null || sessionId == null) { continue; }
+                        try {
+                            String url = "rtsp://" + host + ":" + port + "/" + path;
+                            // GET_PARAMETER 是 RTSP 标准的会话保活，LIVE555 明确认它；
+                            // 有些服务端只认 OPTIONS，所以失败后退回 OPTIONS。
+                            String r = rtsp("GET_PARAMETER", url, "Session: " + sessionId);
+                            if (!r.startsWith("RTSP/1.0 200")) {
+                                r = rtsp("OPTIONS", url, "Session: " + sessionId);
+                            }
+                            if (!r.startsWith("RTSP/1.0 200")) {
+                                Log.w(TAG, "keepalive 异常: " + r.replace("\r\n", " | "));
+                            } else if (kaOk < 3) {
+                                kaOk++;
+                                Log.i(TAG, "keepalive OK (#" + kaOk + ")");
+                            }
+                        } catch (Throwable t) {
+                            Log.w(TAG, "keepalive 失败: " + t);
+                        }
+                    }
+                }
+            }
+        }, "q07-ka");
+        keepAliveThread.start();
+    }
+
+    private void stopKeepAlive() {
+        Thread t = keepAliveThread;
+        keepAliveThread = null;
+        if (t != null) { t.interrupt(); }
+    }
+
     public synchronized void stop() {
         running = false;
         playing = false;
+        stopKeepAlive();
         // TEARDOWN 只发不等响应 —— 等响应会因服务端不回而卡满 5 秒超时，
         // 把调用队列堵死（实测换边要 5.7 秒才返回）。
         try {
