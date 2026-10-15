@@ -34,6 +34,24 @@
             </intent-filter>
         </activity>
 
+        <!-- 长安开发者平台的 SDK 凭据。没有它 CaSdkManager.init() 会直接失败。
+             值由 build.gradle.kts 从 keystore.properties（已 gitignore）注入，不进仓库。 -->
+        <meta-data
+            android:name="ca_dev_client_id"
+            android:value="${caClientId}" />
+        <meta-data
+            android:name="ca_dev_client_secret"
+            android:value="${caClientSecret}" />
+
+        <!-- 预发环境（ENVI_NET != 1 时用）。developer_ca 版本的正式域名还是占位，
+             所以实际要走这套 —— 对应的真实域名是 http://pre-huapp.sda.changan.com.cn -->
+        <meta-data
+            android:name="pre_ca_dev_client_id"
+            android:value="${preCaClientId}" />
+        <meta-data
+            android:name="pre_ca_dev_client_secret"
+            android:value="${preCaClientSecret}" />
+
         <service
             android:name=".OverlayService"
             android:exported="true" />

@@ -172,6 +172,9 @@ public class MainActivity extends Activity {
         setContentView(rootAll);
         switchTab(0);
 
+        // 长安官方 SDK 接入试验（一次性探测，结果看 logcat 的 Q07CaSdk）
+        CaSdkTest.runOnce(this);
+
         // 注意：刷新循环只在界面可见时跑（见 onResume/onPause）。
         // 之前是在这里挂了个 500ms 死循环，退到后台也一直跑，白烧 CPU + 一直重建视图。
     }

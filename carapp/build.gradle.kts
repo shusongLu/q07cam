@@ -36,6 +36,18 @@ android {
         ndk {
             abiFilters += "arm64-v8a"
         }
+
+        // 长安开发者平台的凭据从 keystore.properties 注入（该文件已在 .gitignore 里），
+        // 避免把 client secret 提交到公开仓库。
+        // 正式/pre 两套：SDK 会读 Settings.Global 的 ENVI_NET 决定用哪套
+        // （==1 走正式 https://huappDomain；≠1 走预发 http://pre-huapp.sda.changan.com.cn）。
+        // 这份 developer_ca 是开发者版，正式域名还是占位，所以要走预发。
+        manifestPlaceholders["caClientId"] = keystoreProps.getProperty("caClientId") ?: "guest"
+        manifestPlaceholders["caClientSecret"] = keystoreProps.getProperty("caClientSecret") ?: "guest"
+        manifestPlaceholders["preCaClientId"] =
+            keystoreProps.getProperty("preCaClientId") ?: keystoreProps.getProperty("caClientId") ?: "guest"
+        manifestPlaceholders["preCaClientSecret"] =
+            keystoreProps.getProperty("preCaClientSecret") ?: keystoreProps.getProperty("caClientSecret") ?: "guest"
     }
 
     signingConfigs {
@@ -88,4 +100,19 @@ val copyVendorDex = tasks.register<Copy>("copyVendorDex") {
 
 tasks.matching { it.name == "preBuild" }.configureEach {
     dependsOn(copyVendorDex)
+}
+
+// ---------------------------------------------------------------- 长安官方 SDK
+/**
+ * 「长安开发者平台」下发的 CaSdkManager（客户端）：
+ * 通过 AIDL 绑定车机上的 com.incall.apps.sdkservice（系统服务）。
+ *
+ * 注意：init() 要求 AndroidManifest 里配置 ca_dev_client_id / ca_dev_client_secret
+ * （平台 → 开发文档 → 接入指南 → SDK服务集成），否则直接失败。
+ * 现在填的是占位值，只用来验证"链路能不能绑上"。
+ */
+dependencies {
+    // AAR 里已经自带 libs/*.jar（fastjson / libdatacenter / navi_sdk / voice_sdk），
+    // 不要再单独加一遍，否则 Duplicate class
+    implementation(files("libs/CaSdkManager-0.5.52_developer_ca.aar"))
 }
