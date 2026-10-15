@@ -38,6 +38,20 @@
             android:name=".OverlayService"
             android:exported="true" />
 
+        <!-- 常驻无障碍服务：只用于保活 + 解锁亮屏唤醒，不读取窗口内容 -->
+        <service
+            android:name=".Q07A11yService"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/q07_accessibility" />
+        </service>
+
         <receiver
             android:name=".BootReceiver"
             android:exported="true"
@@ -47,6 +61,12 @@
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <!-- 应用还活着时这些隐式广播会到达；被杀后靠无障碍服务兜底 -->
+                <action android:name="android.intent.action.SCREEN_ON" />
+                <action android:name="android.intent.action.SCREEN_OFF" />
+                <action android:name="android.intent.action.USER_PRESENT" />
+                <action android:name="android.intent.action.USER_UNLOCKED" />
+                <action android:name="android.intent.action.DREAMING_STOPPED" />
             </intent-filter>
         </receiver>
 

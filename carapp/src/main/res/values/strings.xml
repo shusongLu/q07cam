@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Q07 实时数据</string>
+    <string name="q07_a11y_desc">Q07 实时数据：常驻后台，保证悬浮窗与侧摄像头在解锁亮屏后自动恢复。</string>
+</resources>

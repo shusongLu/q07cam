@@ -23,6 +23,11 @@ public class BootReceiver extends BroadcastReceiver {
             Log.i(TAG, "boot(" + action + "): 已关闭开机自启");
             return;
         }
+        // 亮屏/解锁这类广播会频繁到达，服务已在跑就不必重复拉
+        if (OverlayService.running) {
+            Log.i(TAG, "boot(" + action + "): 服务已在运行");
+            return;
+        }
         try {
             Intent i = new Intent(context, OverlayService.class);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
