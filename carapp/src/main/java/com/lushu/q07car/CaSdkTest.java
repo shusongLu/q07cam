@@ -17,6 +17,21 @@ import com.incall.apps.casdkmanager.CaSdkManager;
  */
 public class CaSdkTest {
 
+    /**
+     * 默认关闭。
+     *
+     * 现状：SDK 能绑上车机的 sdkservice（haveInit()=true），但**每次调用都被 SDK 自己的
+     * "接口白名单"拦下** —— 报「接口调用失败, 不支持模块(xxx), 请在长安开发云，开通相关API!」。
+     * 那份名单由云端下发，而 device 上拿不到平台授权；且 developer_ca 版本的正式域名是
+     * 占位（https://huappDomain），云端那条必然失败。
+     *
+     * 另外：官方 SDK 的 vehicle_service.drive 只有车速/挡位/里程/轮胎，**没有发动机转速** ——
+     * 我们现在走的 HIDL 直读信号更全，所以不启用它没有任何损失。
+     *
+     * 等以后拿到平台 API 授权（或上架审核开通），把它改成 true 即可。
+     */
+    public static final boolean ENABLED = false;
+
     private static final String TAG = "Q07CaSdk";
     private static volatile boolean started = false;
 
