@@ -17,6 +17,11 @@ val hasReleaseKey = keystorePropsFile.exists() && !keystoreProps.getProperty("st
  * applicationId 使用 CAKJ 安装校验白名单里的空位名，
  * 这样 adb install 能放行（见 recon/install-bypass.md）。
  *
+ * 2026-10-17：从 `de.dsa.ford.otaflash` 换成 `com.changan.acscenter` ——
+ * 实测闭锁时车机会停掉非系统应用（recon/lock-kill-mechanism.md），
+ * 而 `com.changan.acscenter` 同为 CAKJ 白名单空位，且该名字出现在
+ * scenepower 的豁免名单字符串里，期望能躲过闭锁清理。可逆：改回即恢复。
+ *
  * 运行期能力（均已在车上实测）：
  *  - SOA 厂商 HIDL：普通 App 就能拿到（soatest 已验证）
  *  - 侧摄像头 H.265 RTSP：用厂商 libffmpeg.so
@@ -27,7 +32,7 @@ android {
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "de.dsa.ford.otaflash"
+        applicationId = "com.changan.acscenter"
         minSdk = 30
         targetSdk = 30
         versionCode = 20

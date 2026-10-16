@@ -95,6 +95,36 @@ de.dsa.ford.otaflash            ← 我们正在用（另一个空位）
 **这是一个便宜的、可逆的实测**，值得先试。若无效，则说明这台车是"**闭锁时停掉所有非系统应用**"的既定策略，
 应用侧无解（只能靠厂商白名单 / OTA / 商店版）。
 
+## ✅ 结论：换包名 `com.changan.acscenter` 生效（2026-10-17 实车 A/B 验证）
+
+同车、同一晚、同样的闭锁+解锁测试，只改包名：
+
+| | 包名 | 闭锁后结果 |
+|---|---|---|
+| **A** | `de.dsa.ford.otaflash` | **被杀** ✗：`stopped=true`、无障碍服务被摘、进程 pid 变了、用户手动点开才回来 |
+| **B** | `com.changan.acscenter` | **存活** ✅：**同一个 pid**（11573）、`stopped=false`、无障碍还在、`am_kill` 里**没有我们** |
+
+同时期别的应用照样被杀（`com.shusong.appmanagf`、`com.netease.cloudmusic.iot`、`android.process.acore` …），
+而我们没事 —— 说明**车机的闭锁清理确实有一份"包名豁免名单"**，
+`com.changan.acscenter` 在名单里，`de.dsa.ford.otaflash` 不在。
+
+**这正是之前反复找不到答案的原因**：名单是**按包名**判定的，而名单本身在只读分区/硬编码里，
+所以"改代码让它别被杀"是死路 —— **但"换一个已经在名单里的包名"是通的** ✅
+
+### 为什么这个包名能两全
+
+| 条件 | 说明 |
+|---|---|
+| CAKJ 安装校验 | `com.changan.acscenter` 是许可名单的**空位** → `adb install` 照常放行 ✅ |
+| 车机豁免名单 | 该名字出现在 scenepower 的字符串表里，且实测确实豁免 ✅ |
+| 不冲突 | 实测 `pm path com.changan.acscenter` 为空（该厂商应用未预装）✅ |
+
+### 换名后的注意
+
+- 包名变了 → **窗口布局等偏好是新装的默认值**，需要在编辑模式里重新调一次位置/大小
+- 无障碍与悬浮窗权限要重新授一次（`settings put secure enabled_accessibility_services` + `appops set ... SYSTEM_ALERT_WINDOW allow`）
+- 回滚：把 `build.gradle.kts` 的 `applicationId` 改回 `de.dsa.ford.otaflash` 重装即可
+
 ## ⚠️ 一条硬规矩（本次踩坑）
 
 **禁止用 adb 发 `keyevent 223`(SLEEP)** —— 车机关屏时会连 Wi-Fi/ADB 一起断，
