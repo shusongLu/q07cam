@@ -142,6 +142,52 @@ adb shell dumpsys package com.changan.acscenter | grep WRITE_SECURE_SETTINGS   #
 
 （重装后需要重新授一次。）
 
+## 锁车省电：自己休眠（2026-10-17 实车验证 ✅）
+
+### ⚠️ 关键：车机的"关屏"是**关背光**，不走 Android 电源状态
+
+```
+02:34:12.406  SDAS2-DisplayAdjust: setBackLightEnableJava display_num: 3 enable: 2
+02:34:12.411  Hal_displayAdjust_jni: [setBackLightEnable] /sys/class/backlight/panel0/bl_power, enable: 2
+```
+
+而 Android 侧毫无察觉：
+
+```
+dumpsys power -> mWakefulness=Awake, Display Power: state=ON
+```
+
+→ **`ACTION_SCREEN_OFF` 永远不会发送** ✗ —— 所以第一版"收到 SCREEN_OFF 就休眠"的实现
+**一次都没触发**（日志连续无中断予以证实）。
+
+**可靠的关屏信号**是这个 sysfs（**世界可读**，普通应用直接能读）：
+
+```
+/sys/class/backlight/panel0/bl_power     -rw-r--r--   0 = 亮，非 0 = 灭
+```
+
+### 实现（`OverlayService`）
+
+- 轮询线程每轮先 `backlightOff()`：灭 → `enterSleep()` —— `releaseCameras()`
+  （释放 RTSP + H.265 解码器）、`slept=true`
+- 两个轮询线程随即在 `sleepLock` 上阻塞；休眠中**每 2 秒只读一次那个 sysfs**，
+  背光回来 → `exitSleep()` → `notifyAll()` + `setupPreconnect()`/`updateCamera()` 恢复
+- 摄像头节拍 / 看门狗 / 面板重绘在休眠时跳过（间隔放慢到 2s/10s/5s）
+- `ACTION_SCREEN_OFF/ON/USER_PRESENT` 接收器**保留**（万一别的场景平台会发）
+
+### 实测结果
+
+```
+02:37:32.935  [sleep] 关屏（背光灭）→ 休眠：释放摄像头、停轮询
+02:37:54.940  [sleep] 亮屏（背光回）→ 唤醒：恢复摄像头与轮询
+```
+
+- 休眠 22 秒，**状态行时间戳断档**（`02:37:24` → `02:37:57`）→ 证明轮询真的停了
+- 全程 **pid 不变**、`stopped=false`、无障碍服务还在 ✓
+
+→ **既省电（锁车期间几乎没有 CPU/唤醒），又能解锁自动回来** —— 这是"换包名不被杀"换来的能力：
+因为没被 force-stop，我们才收得到背光/广播/无障碍事件。
+
 ## ⚠️ 一条硬规矩（本次踩坑）
 
 **禁止用 adb 发 `keyevent 223`(SLEEP)** —— 车机关屏时会连 Wi-Fi/ADB 一起断，
