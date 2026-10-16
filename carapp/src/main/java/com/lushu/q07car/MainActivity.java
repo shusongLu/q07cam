@@ -194,6 +194,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // 进 App 就保证悬浮窗服务在跑（不动两个开关；被系统停掉/没起来时自动拉起）
+        if (!OverlayService.running) {
+            try { startServiceCompat(); } catch (Throwable t) { Log.e(TAG, "拉起悬浮窗服务失败: " + t); }
+        }
         // 告诉服务：主界面在前台 → 需要完整数据（低功耗模式下会跳过 SOA 轮询）
         OverlayService.setUiForeground(true);
         overlayOk = checkOverlay();

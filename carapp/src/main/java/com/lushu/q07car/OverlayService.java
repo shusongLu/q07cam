@@ -172,6 +172,8 @@ public class OverlayService extends Service {
         String url;
         boolean onScreen;
         boolean started;
+        /** 想要显示、但还没显形（在等第一帧）。 */
+        boolean wantShow;
     }
 
     private final CamSide[] sides = new CamSide[]{new CamSide(), new CamSide()};
@@ -861,11 +863,12 @@ public class OverlayService extends Service {
             ensureSide(want, (preMask & (1 << want)) != 0);
             if (sides[want].player == null) startSide(want);
             else resumeSide(want);
-            moveSide(want, true);
+            armReveal(want);           // 有画面了再显形，避免黑一下
         } else {
             sides[want].url = urlOf(want);
             ensureSide(want, false);
             startSide(want);           // surface 就绪后会自行起播
+            armReveal(want);           // 同上：等第一帧
             curWant = want;
         }
 
@@ -907,7 +910,7 @@ public class OverlayService extends Service {
             if (want < 0) return;
             ensureSide(want, (preMask & (1 << want)) != 0);
             startSide(want);
-            moveSide(want, true);
+            armReveal(want);           // 等第一帧再显形
         }
     };
 
@@ -961,9 +964,14 @@ public class OverlayService extends Service {
                 handle.setOnTouchListener(new ResizeTouch());
             }
 
+            int fullH = Math.max(dp(112), (int) (camW / CAM_ASPECT + 0.5f));
+            // 正常使用：一律先按"隐藏态"建窗（64x36 + 近全透明），
+            // 等解码器真的画出第一帧再 moveSide(idx,true) 显形 —— 否则新起的流会先黑一下。
+            // 编辑模式保持原样（整窗可见，方便拖/缩放）。
+            boolean hideFirst = !editMode;
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                    (pre && !editMode) ? HIDDEN_W : camW,
-                    (pre && !editMode) ? HIDDEN_H : Math.max(dp(112), (int) (camW / CAM_ASPECT + 0.5f)),
+                    hideFirst ? HIDDEN_W : camW,
+                    hideFirst ? HIDDEN_H : fullH,
                     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                             | (editMode ? 0 : WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
@@ -976,15 +984,16 @@ public class OverlayService extends Service {
             } else {
                 lp.x = camX;                       // 正常使用：留在原位，靠透明度隐藏
                 lp.y = camY;
-                lp.alpha = pre ? HIDDEN_ALPHA : 1f;
+                lp.alpha = HIDDEN_ALPHA;
             }
             wm.addView(box, lp);
             s.view = box;
             s.url = urlOf(idx);
-            s.onScreen = !pre;
+            s.onScreen = editMode && !pre;         // 编辑模式沿用原状态；正常使用一律先隐藏
             Log.i(TAG, "[cam] 建窗口 " + (idx == SIDE_LEFT ? "左" : "右")
                     + (pre ? (editMode ? "（预连，离屏）" : "（预连，透明隐藏）") : "")
-                    + " " + camW + "x" + camH + " @" + lp.x + "," + lp.y);
+                    + " 初始=" + lp.width + "x" + lp.height + " alpha=" + lp.alpha
+                    + " 目标=" + camW + "x" + camH + " @" + lp.x + "," + lp.y);
         } catch (Throwable t) {
             Log.e(TAG, "[cam] ensureSide 失败: " + t);
         }
@@ -992,8 +1001,12 @@ public class OverlayService extends Service {
 
     private void moveSide(int idx, boolean onScreen) {
         CamSide s = sides[idx];
+        s.wantShow = onScreen;
         // 先按"是否在显示"决定这一侧要不要把解码结果画到 Surface 上（隐藏侧只解码不渲染）
-        if (s.player != null) { s.player.setRender(onScreen); }
+        if (s.player != null) {
+            if (!onScreen) { s.player.setOnFirstFrame(null); }   // 不再等显形
+            s.player.setRender(onScreen);
+        }
         if (s.view == null || wm == null || s.onScreen == onScreen) return;
         try {
             WindowManager.LayoutParams lp = (WindowManager.LayoutParams) s.view.getLayoutParams();
@@ -1024,6 +1037,39 @@ public class OverlayService extends Service {
         }
     }
 
+    /**
+     * 想显示某一侧，但**先不显形**：窗口留在隐藏态、打开渲染，
+     * 等解码器真的画出第一帧再显形 —— 避免"弹出来先黑一下"。
+     *
+     * 已经出过画面的（之前显示过、隐藏后 TextureView 还留着最后一帧）直接显形，不必等。
+     */
+    private void armReveal(final int idx) {
+        final CamSide s = sides[idx];
+        s.wantShow = true;
+        final Q07RtspPlayer p = s.player;
+        if (p == null) { return; }          // 播放器还没建 —— startSide 里建好后会再调一次
+
+        p.setRender(true);                  // 往（仍然隐藏的）窗口出画
+        if (p.hasRendered()) {              // 隐藏态下已经有过画面，直接显形
+            p.setOnFirstFrame(null);
+            moveSide(idx, true);
+            return;
+        }
+        p.setOnFirstFrame(new Runnable() {
+            @Override public void run() {
+                handler.post(new Runnable() {
+                    @Override public void run() {
+                        CamSide cs = sides[idx];
+                        if (cs.player != p) return;    // 中途换过播放器，忽略
+                        if (!cs.wantShow) return;      // 期间又不要显示了，忽略
+                        p.setOnFirstFrame(null);
+                        moveSide(idx, true);           // 有画面了，显形
+                    }
+                });
+            }
+        });
+    }
+
     private void startSide(final int idx) {
         final CamSide s = sides[idx];
         if (s.started) return;
@@ -1032,6 +1078,7 @@ public class OverlayService extends Service {
         if (s.player == null) s.player = new Q07RtspPlayer(OverlayService.this, s.url);
         final Q07RtspPlayer p = s.player;
         p.setRender(s.onScreen);   // 预连（隐藏）的那一侧只解码、不渲染
+        if (s.wantShow) { armReveal(idx); }   // 想要显示：等第一帧真的画出来再显形
         camExec.execute(new Runnable() {
             @Override public void run() {
                 try {

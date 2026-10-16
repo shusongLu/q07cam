@@ -72,7 +72,16 @@ public class Q07RtspPlayer {
      */
     private volatile boolean renderOutput = true;
 
+    /** 当前解码器实例有没有真正把画面画到 Surface 上（用于"有画面了再显形"）。 */
+    private volatile boolean rendered = false;
+    private volatile Runnable onFirstFrame;
+
     public void setRender(boolean r) { renderOutput = r; }
+
+    /** 第一帧真的画出来时回调一次。注意：在 RTP 线程上调用，回调里要自己切线程。 */
+    public void setOnFirstFrame(Runnable r) { onFirstFrame = r; }
+
+    public boolean hasRendered() { return rendered; }
 
     private byte[] vps, sps, pps;
     private long frameCount;
@@ -643,7 +652,15 @@ public class Q07RtspPlayer {
             while (true) {
                 int idx = codec.dequeueOutputBuffer(info, 0);
                 if (idx < 0) return;
-                codec.releaseOutputBuffer(idx, renderOutput);
+                boolean drew = renderOutput;
+                codec.releaseOutputBuffer(idx, drew);
+                if (drew && !rendered) {
+                    rendered = true;
+                    Runnable cb = onFirstFrame;
+                    if (cb != null) {
+                        try { cb.run(); } catch (Throwable ignored) {}
+                    }
+                }
             }
         } catch (Throwable ignored) {
         }
@@ -673,6 +690,7 @@ public class Q07RtspPlayer {
                 fmt.setByteBuffer("csd-0", ByteBuffer.wrap(csd.toByteArray()));
             }
             codec = MediaCodec.createDecoderByType("video/hevc");
+            rendered = false;              // 新解码器：等它的第一帧
             codec.configure(fmt, surface, null, 0);
             codec.start();
             Log.i(TAG, "MediaCodec video/hevc 已启动");
@@ -688,5 +706,6 @@ public class Q07RtspPlayer {
             try { codec.release(); } catch (Throwable ignored) {}
             codec = null;
         }
+        rendered = false;      // 解码器换了，要重新等第一帧
     }
 }

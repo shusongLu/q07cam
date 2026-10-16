@@ -178,3 +178,56 @@ android.hardware.audio.service (pid 404) ── 26,893 次/秒 = 内核总量 91
 > audio.service 那 26.9k 切换/秒修复不了（要 root 或 OTA），
 > 且它只占 11.9% 单核 —— 即使修掉也解决不了卡顿。
 > 我们的 App（11.6%）在 CPU 排行第 7~8 位，不是原因。
+
+---
+
+## 车机恢复出厂设置后的基线（2026-10-17）
+
+用户重置了车机（我们的 App 随之被删除）。开机 ~27 分钟后复测。
+
+### 数值
+
+| 指标 | 重置前 | 重置后 |
+|---|---|---|
+| Load average | 11 ~ 25 | **8.19 / 8.04 / 6.90** |
+| **PSI cpu some** | avg300 = **35.3%** | avg300 = **15.1%**（avg10 13.8）|
+| PSI io / memory | 0 / 0 | 0 / 0 |
+| 内核总上下文切换 | 88,300 /秒 | **104,105 /秒** |
+| `audio_hal_cap`+`ref` | 26,005 /秒 | **31,893 /秒**（占内核 30.6%）|
+| 活跃录音会话 | 有 | 有（`AudioIn_5E` Standby: no）|
+
+### 🔑 重要推论：切换数高 ≠ 卡
+
+重置后**上下文切换反而更高**（104k vs 88k），但 **PSI 压力几乎减半**（15% vs 35%）。
+→ **切换风暴不是"卡"的成因，CPU 需求才是。** 之前把 audio.service 的 26k 切换
+当成头号嫌疑是过度归因，应回到 CPU 口径（谁是 CPU 消耗大户）。
+
+### audio.service 是"内核态"消耗
+
+`dumpsys cpuinfo`：`10% android.hardware.audio.service: **1.3% user + 9.4% kernel**`
+→ 印证了之前的判断：这不是在"算"，而是在**高频系统调用/唤醒**上烧时间
+（与"一次切换约 3 µs"的估算一致）。
+
+### 复查修正："懒创建后泄漏"说得太满
+
+重置这一轮里 `audio_hal_cap`/`audio_hal_ref` 的 tid 是 **744/745**（很低），
+说明它们在**开机早期**就已存在，不是"开机一小时后才创建"。
+更准确的说法：**它们在第一次采集会话建立时创建，之后不再退出**（本轮语音助手很快就开了麦）。
+"空转 ~30k/秒、与当前是否在录音脱钩、非 root 修不掉"这几条结论不变。
+
+### 重置后的 CPU 排行（dumpsys cpuinfo，5 分钟窗口）
+
+```
+29%  com.incall.apps.speechassistant        27%  com.incall.apps.navi.service
+24%  soabridge@1.0-service                  11%  com.incall.apps.sdkservice
+11%  sdalauncher:vpa                        10%  android.hardware.audio.service（内核态为主）
+9.3% sdalauncher                             9.2% system_server
+7.6% surfaceflinger                          7.3% com.desaysv.ivi.dms
+7.2% com.changan.evs.appservice              6.9% graphics.composer@2.1-service
+6.1% systemui                                5.1% adasService
+4.5% logd                                    4.2% logcollector
+3.5% data-collect-center                     3.1% camera.provider@2.4-service
+2.8% com.incall.SoaBridgeTransit             2.4% sdamediaservice / bluetooth
+```
+
+**同一批厂商应用，一个不少** —— 重置并不会让车机变快，只是把"我们 App"这一项清零了。
