@@ -4,8 +4,10 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.Typeface;
@@ -97,6 +99,44 @@ public class OverlayService extends Service {
     }
     /** 服务活着才继续跑轮询线程（否则 stopService/startService 会泄漏线程）。 */
     private volatile boolean alive = false;
+
+    /**
+     * 关屏/闭锁 → **彻底休眠**：释放摄像头（RTSP + 解码器），两个轮询线程在锁上阻塞，
+     * 看门狗/重绘也放慢 —— 目标是把休眠期间的唤醒与 CPU 压到接近 0，不给车机耗电。
+     * 亮屏/解锁 → 唤醒并恢复。
+     *
+     * 为什么由我们自己睡而不是让车机杀：车机闭锁确实会停掉应用（省电），
+     * 但被 force-stop 后平台层面再也叫不回来（见 recon/lock-kill-mechanism.md）。
+     * 现在这个包名在车机的豁免名单里、不会被停，所以我们**有能力**用"自己睡"换
+     * "解锁自动回来" —— 两全。
+     */
+    private volatile boolean slept = false;
+    private final Object sleepLock = new Object();
+    private BroadcastReceiver screenReceiver;
+
+    private void enterSleep() {
+        if (slept) return;
+        slept = true;
+        Log.i(TAG, "[sleep] 关屏 → 休眠：释放摄像头、停轮询");
+        try { releaseCameras(); } catch (Throwable ignored) {}
+    }
+
+    private void exitSleep() {
+        if (!slept) return;
+        slept = false;
+        Log.i(TAG, "[sleep] 亮屏 → 唤醒：恢复摄像头与轮询");
+        synchronized (sleepLock) { sleepLock.notifyAll(); }
+        try { setupPreconnect(); updateCamera(); } catch (Throwable ignored) {}
+    }
+
+    /** 休眠时在这里阻塞等待被唤醒 —— 不轮询、不唤醒内核，耗电≈0。 */
+    private void awaitAwake() {
+        synchronized (sleepLock) {
+            while (slept && alive) {
+                try { sleepLock.wait(); } catch (InterruptedException e) { return; }
+            }
+        }
+    }
 
     private WindowManager wm;
     private TextView tvMain;
@@ -259,11 +299,30 @@ public class OverlayService extends Service {
         // 副驾屏面板
         setupAuxDisplay();
 
+        // 关屏休眠 / 亮屏唤醒。我们能收到这些广播，正是因为没被车机 force-stop。
+        try {
+            IntentFilter sf = new IntentFilter();
+            sf.addAction(Intent.ACTION_SCREEN_OFF);
+            sf.addAction(Intent.ACTION_SCREEN_ON);
+            sf.addAction(Intent.ACTION_USER_PRESENT);
+            screenReceiver = new BroadcastReceiver() {
+                @Override public void onReceive(Context c, Intent i) {
+                    String a = i == null ? null : i.getAction();
+                    if (Intent.ACTION_SCREEN_OFF.equals(a)) enterSleep();
+                    else exitSleep();
+                }
+            };
+            registerReceiver(screenReceiver, sf);
+        } catch (Throwable t) {
+            Log.w(TAG, "[sleep] 注册屏幕广播失败: " + t);
+        }
+
         // 转向灯单独用高频线程读（只读 1 个属性，~20ms），把发现延迟从 300ms 压到 ~60ms
         alive = true;
         new Thread(new Runnable() {
             @Override public void run() {
                 while (alive) {
+                    if (slept) { awaitAwake(); continue; }       // ★ 休眠：完全不轮询
                     boolean need = needTurn();
                     if (need) pollTurn();
                     // 60ms → 90ms：打灯发现延迟 +30ms 基本无感，但少了 1/3 的 HIDL 往返
@@ -276,6 +335,7 @@ public class OverlayService extends Service {
         new Thread(new Runnable() {
             @Override public void run() {
                 while (alive) {
+                    if (slept) { awaitAwake(); continue; }       // ★ 休眠：完全不轮询
                     poll();
                     try { Thread.sleep(2000L); } catch (InterruptedException e) { return; }
                 }
@@ -285,24 +345,24 @@ public class OverlayService extends Service {
         // 界面节拍：只做摄像头窗口切换（很轻），100ms 保证打灯响应
         handler.post(new Runnable() {
             @Override public void run() {
-                updateCamera();
-                handler.postDelayed(this, 100L);
+                if (!slept) updateCamera();
+                handler.postDelayed(this, slept ? 2000L : 100L);
             }
         });
 
         // 看门狗：每秒体检一次（SOA 自愈 / 摄像头重连）
         handler.post(new Runnable() {
             @Override public void run() {
-                healthCheck();
-                handler.postDelayed(this, 1000L);
+                if (!slept) healthCheck();
+                handler.postDelayed(this, slept ? 10000L : 1000L);
             }
         });
 
         // 数据面板：400ms 一次，且文本没变就不 setText（避免无谓重绘）
         handler.post(new Runnable() {
             @Override public void run() {
-                render();
-                handler.postDelayed(this, 400L);
+                if (!slept) render();
+                handler.postDelayed(this, slept ? 5000L : 400L);
             }
         });
         running = true;
@@ -313,6 +373,9 @@ public class OverlayService extends Service {
     public void onDestroy() {
         running = false;
         alive = false;
+        try { if (screenReceiver != null) unregisterReceiver(screenReceiver); } catch (Throwable ignored) {}
+        screenReceiver = null;
+        synchronized (sleepLock) { sleepLock.notifyAll(); }   // 唤醒阻塞的轮询线程让它们退出
         for (int i = 0; i < 2; i++) {
             stopPlayer(i);
             CamSide s = sides[i];
