@@ -132,6 +132,12 @@ public class OverlayService extends Service {
      */
     private volatile int curTurn = 0;
     private volatile long curTurnAt = 0;
+
+    /** 转向灯灭后摄像头窗口再保留多久（毫秒）。0 = 立即关。 */
+    private volatile int camOffDelayMs = 0;
+    /** cameraTurn() 的保持状态：信号消失后继续返回它，直到延迟用完。 */
+    private volatile int holdTurn = 0;
+    private volatile long holdTurnAt = 0;
     private volatile int bothStreak = 0;
     /** 收到转向信号的时间，用来量"信号 -> 出画面"的延迟。 */
     private volatile long turnSignalAt = 0;
@@ -336,10 +342,11 @@ public class OverlayService extends Service {
         showCamera = Prefs.getBool(this, Prefs.KEY_SHOW_CAMERA, true);
         mirrorLeft = Prefs.getStr(this, Prefs.KEY_MIRROR_LEFT, Prefs.MIRROR_H);
         mirrorRight = Prefs.getStr(this, Prefs.KEY_MIRROR_RIGHT, Prefs.MIRROR_H);
+        camOffDelayMs = Prefs.getInt(this, Prefs.KEY_CAM_OFF_DELAY, Prefs.DEF_CAM_OFF_DELAY);
 
         Log.i(TAG, "[cam] 预连=" + p + "(mask=" + preMask + ")  面板=" + panelX + "," + panelY
                 + " " + panelW + "x" + panelH + "  摄像头=" + camX + "," + camY + " " + camW + "x" + camH
-                + "  编辑模式=" + editMode);
+                + "  编辑模式=" + editMode + "  灭灯延迟=" + camOffDelayMs + "ms");
     }
 
     private int dp(float v) {
@@ -571,6 +578,27 @@ public class OverlayService extends Service {
     private int turnState() {
         long hold = Math.max(TURN_HOLD_MIN_MS, Math.min(TURN_HOLD_MS, (long) (flashInterval * 1.7)));
         return (System.currentTimeMillis() - curTurnAt < hold) ? curTurn : 0;
+    }
+
+    /**
+     * 摄像头该显示哪一侧（含"灭灯延迟"）。
+     *
+     * 转向灯灭后，按配置再保留 camOffDelayMs 毫秒才收窗口（默认 0 = 立即收）。
+     * 注意 turnState() 自身已经带一层"闪烁去抖"的保持窗口，这里是它之后**额外**的延迟。
+     */
+    private int cameraTurn() {
+        int t = showCamera ? turnState() : 0;
+        long now = System.currentTimeMillis();
+        if (t != 0) {
+            holdTurn = t;
+            holdTurnAt = now;
+            return t;
+        }
+        if (camOffDelayMs > 0 && holdTurn != 0 && now - holdTurnAt < camOffDelayMs) {
+            return holdTurn;      // 信号已消失，但延迟还没走完
+        }
+        holdTurn = 0;
+        return 0;
     }
 
     // ---------------------------------------------------------------- 渲染
@@ -844,7 +872,7 @@ public class OverlayService extends Service {
             return;
         }
         if (!camBuilt) setupPreconnect();
-        int turn = showCamera ? turnState() : 0;
+        int turn = cameraTurn();          // 含"灭灯延迟"，默认 0 = 立即收
         int want = (turn == 1) ? SIDE_LEFT : (turn == 2) ? SIDE_RIGHT : -1;
 
         if (want < 0) {

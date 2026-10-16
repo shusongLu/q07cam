@@ -417,6 +417,38 @@ public class MainActivity extends Activity {
                 restartService();
             }
         }));
+
+        LinearLayout offd = card(page, "转向灯灭后延迟关闭");
+        note(offd, "说明：转向灯是「闪」的，所以程序本来就有一个**闪烁去抖窗口**（约 0.9~2.5 秒，随闪烁周期自适应）——\n"
+                + "灯在闪的时候窗口不会跟着一开一关。\n"
+                + "这里配的是**去抖窗口走完之后**再额外保留多久才收起，用来避免连续变道时窗口来回闪。\n"
+                + "默认 0 = 去抖窗口一过就立即关闭（维持原来的行为）。");
+
+        final int[] delayVals = {0, 500, 1000, 2000, 3000};
+        final String[] delayLabels = {"立即关闭（默认）", "0.5 秒", "1 秒", "2 秒", "3 秒"};
+        int curDelay = Prefs.getInt(this, Prefs.KEY_CAM_OFF_DELAY, Prefs.DEF_CAM_OFF_DELAY);
+
+        final RadioGroup og = new RadioGroup(this);
+        og.setOrientation(RadioGroup.VERTICAL);
+        for (int i = 0; i < delayVals.length; i++) {
+            RadioButton rb = new RadioButton(this);
+            rb.setText(delayLabels[i]);
+            rb.setTextSize(15f);
+            rb.setTextColor(cText);
+            rb.setButtonTintList(tint());
+            rb.setId(i);
+            if (delayVals[i] == curDelay) rb.setChecked(true);
+            og.addView(rb);
+        }
+        offd.addView(og);
+        offd.addView(primary("应用并重启悬浮窗", new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                int id = og.getCheckedRadioButtonId();
+                Prefs.putInt(MainActivity.this, Prefs.KEY_CAM_OFF_DELAY,
+                        (id >= 0 && id < delayVals.length) ? delayVals[id] : 0);
+                restartService();
+            }
+        }));
     }
 
     // ================================================================ 副驾屏页

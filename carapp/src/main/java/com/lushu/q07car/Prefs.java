@@ -31,6 +31,9 @@ public class Prefs {
     // 摄像头画面镜像模式：none | h | v | hv（左右各自）
     public static final String KEY_MIRROR_LEFT = "mirror_left_mode";
     public static final String KEY_MIRROR_RIGHT = "mirror_right_mode";
+    /** 转向灯灭后摄像头窗口再保留多久（毫秒，0 = 立即关）。 */
+    public static final String KEY_CAM_OFF_DELAY = "cam_off_delay_ms";
+    public static final int DEF_CAM_OFF_DELAY = 0;
     public static final String MIRROR_NONE = "none";
     public static final String MIRROR_H = "h";     // 水平镜像（像后视镜）
     public static final String MIRROR_V = "v";     // 垂直翻转
