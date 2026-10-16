@@ -49,7 +49,7 @@ public class OverlayService extends Service {
     private static final int ID_POWER_SHIFT  = 0x00408004; // 电源挡位
     private static final int ID_PT_LAMP      = 0x00419788; // 仪表文字显示      [25]=电量%
     private static final int ID_BCU_OPER_PRM = 0x00419307; // BCU               [12]=高压电压 V
-    private static final int ID_PDU_OPER_PRM = 0x00419309; // PDU               [8]=母线电压 [0]=电流
+    private static final int ID_PDU_OPER_PRM = 0x00419309; // PDU  [8][13]=母线电压(0.1V) [15]=电流(A) [0]=温度(0.1℃,非电流!)
     private static final int ID_RESI_MILG    = 0x00412055; // 剩余里程 km
     private static final int ID_TOTAL_MILG   = 0x00501000; // 总里程
     private static final int ID_REEV_OPER    = 0x00413072; // 增程器运行参数
@@ -58,7 +58,7 @@ public class OverlayService extends Service {
     private static final int ID_TURN_LI      = 0x00415244; // 转向灯 [0]=左 [1]=右
 
     /** PDU[0] 量纲：×0.01 A（可用 /data/local/tmp/q07scale.txt 覆盖）。 */
-    private static volatile float PDU_CURRENT_SCALE = 0.01f;
+    private static volatile float PDU_CURRENT_SCALE = 1.0f;   // [15] 是整数安培，系数 1
     private static final float SPEED_SCALE = 0.1f;
 
     /** 转向灯保持窗口（去闪烁）：自适应，取实测闪烁周期的 1.7 倍，钳制在 [900, 2500]ms。 */
@@ -105,6 +105,10 @@ public class OverlayService extends Service {
 
     // 数据
     private volatile float kwPdu, pduVolt, pduCur, hvVolt, socPct, rangeKm, totalKm, speed;
+    /** 电池包电压（BCU[0]/10）—— 与车机显示值精确一致。 */
+    private volatile float packVolt;
+    /** 充电/放电功率是否可信。当前恒为 false：电流拿不到，见 poll() 里的说明。 */
+    private volatile boolean powerKnown = false;
     private volatile int gear = -1, gearInvalid = -1, powerShift = -1;
     /** 发动机(增程器)转速 rpm：0x0041317B[8]（实测：熄火 0 / 低档 990 / 中档 1090 / 高档 1350） */
     private volatile int rpm = 0;
@@ -508,19 +512,28 @@ public class OverlayService extends Service {
             if ((a = soa.read(ID_POWER_SHIFT)) != null && a.length >= 1) { powerShift = a[0]; any = true; }
             if ((a = soa.read(ID_RESI_MILG)) != null && a.length >= 1) { rangeKm = a[0]; any = true; }
             if ((a = soa.read(ID_TOTAL_MILG)) != null && a.length >= 1) { totalKm = a[0]; any = true; }
-            if ((a = soa.read(ID_BCU_OPER_PRM)) != null && a.length > 12) { hvVolt = a[12]; any = true; }
+            if ((a = soa.read(ID_BCU_OPER_PRM)) != null && a.length > 12) {
+                hvVolt = a[12];
+                // ★ 与车机显示值精确一致的电压：BCU[0] ÷ 10
+                //   （实车对照：车机 387.5 V ↔ BCU[0]=3875，三次采样全部相等）
+                packVolt = a[0] / 10f;
+                any = true;
+            }
             if ((a = soa.read(ID_PT_LAMP)) != null && a.length > 25) { socPct = a[25]; any = true; }
             if ((a = soa.read(ID_VCU_STS)) != null && a.length > 21) {
-                charging = (a[0] == 2 || a[21] == 9);
+                // 实车标定（快充 31.6kW/388.7V/80.3A 现场）：a[1]=2 表示充电中。
+                // 原注释写 [0]=2 属于差一位（[0] 实测恒为 1），保留旧判据做兜底。
+                charging = (a[1] == 2) || (a[0] == 2) || (a[21] == 9);
                 any = true;
             }
-            if ((a = soa.read(ID_PDU_OPER_PRM)) != null && a.length > 13) {
-                pduVolt = a[8] / 10f;
-                pduCur = a[0] * PDU_CURRENT_SCALE;
-                float kw = pduVolt * pduCur / 1000f;
-                kwPdu = charging ? -kw : kw;   // 正 = 放电，负 = 充电
-                any = true;
-            }
+            // 充放电功率：车机显示的是「电池包电压 × 电池包电流」（反编译能量 App 的
+            // chargePower() 确认：power = voltage * current / 1000），但我们只能拿到电压。
+            // 那个"电池包电流"不在这条 SOA 总线上 —— 厂商 SOA 客户端全表里没有任何
+            // 充电电流取值器（verify：SoaBridgeTransit 的 SoaBridgeNativeClient +
+            // SoaBridge*ClientManager 全部取值器），车机自己的值是绕 CA SDK 从 QNX
+            // 仪表（event_module/meter_service）取的，而 CA SDK 被 authority 白名单挡住。
+            // 详见 recon/power-calibration.md。宁可不显示，也不显示错的数。
+            powerKnown = false;
             if ((a = soa.read(ID_REEV_OPER)) != null) {
                 for (int i = 0; i < reev.length && i < a.length; i++) reev[i] = a[i];
                 any = true;
@@ -545,11 +558,11 @@ public class OverlayService extends Service {
     /** 把当前数据打包给 App 页面显示。 */
     private void publishLive() {
         liveRows = new String[]{
-                "实时功率|" + String.format(Locale.US, "%.2f kW", kwPdu),
+                "实时功率|" + (powerKnown ? String.format(Locale.US, "%.2f kW", kwPdu) : "—（需厂商授权）"),
                 "充放电|" + (charging ? "充电中（发电/接桩）" : "放电中"),
                 "高压电压|" + String.format(Locale.US, "%.0f V", hvVolt),
-                "母线电压|" + String.format(Locale.US, "%.1f V", pduVolt),
-                "电池电流|" + String.format(Locale.US, "%.1f A", pduCur),
+                "电池电压|" + String.format(Locale.US, "%.1f V", packVolt),
+                "电池电流|—",
                 "电量|" + String.format(Locale.US, "%.0f %%", socPct),
                 "剩余里程|" + String.format(Locale.US, "%.0f km", rangeKm),
                 "总里程|" + String.format(Locale.US, "%.0f km", totalKm),
@@ -606,10 +619,10 @@ public class OverlayService extends Service {
     private void render() {
         if (!showPanel && auxView == null) { return; }   // 没人看就不必拼字符串
         SpannableStringBuilder sb = new SpannableStringBuilder();
-        append(sb, String.format(Locale.US, "%.2f kW", kwPdu), 2.6f,
-                charging ? 0xFF6EC6FF : 0xFF8AE234, true);
-        append(sb, String.format(Locale.US, "\n%s   ·   PDU %.1fV × %.1fA   ·   高压 %.0fV",
-                charging ? "充电中" : "放电中", pduVolt, pduCur, hvVolt),
+        append(sb, powerKnown ? String.format(Locale.US, "%.2f kW", kwPdu) : "—",
+                2.6f, charging ? 0xFF6EC6FF : 0xFF8AE234, true);
+        append(sb, String.format(Locale.US, "\n%s   ·   电池 %.1fV   ·   高压 %.0fV",
+                charging ? "充电中" : "放电中", packVolt, hvVolt),
                 0.8f, charging ? 0xFF6EC6FF : 0xFF9ACD32, false);
         append(sb, String.format(Locale.US, "\n电量 %.0f%%   ·   续航 %.0f km   ·   总里程 %.0f km",
                 socPct, rangeKm, totalKm), 1f, 0xFFE6EDF3, false);
@@ -631,9 +644,11 @@ public class OverlayService extends Service {
         if (now - lastLogAt > 10000L) {
             lastLogAt = now;
             Log.i(TAG, String.format(Locale.US,
-                    "kw=%.2f pduV=%.1f pduI=%.1f hv=%.0f soc=%.0f range=%.0f odo=%.0f gear=%s spd=%.1f turn=%s  [推送累计 %d]",
-                    kwPdu, pduVolt, pduCur, hvVolt, socPct, rangeKm, totalKm,
-                    gearName(gear, gearInvalid), speed, turnName(turnState()), pushCount));
+                    "kw=%s packV=%.1f hv=%.0f soc=%.0f range=%.0f odo=%.0f gear=%s spd=%.1f turn=%s chg=%s [推送累计 %d]",
+                    powerKnown ? String.format(Locale.US, "%.2f", kwPdu) : "n/a",
+                    packVolt, hvVolt, socPct, rangeKm, totalKm,
+                    gearName(gear, gearInvalid), speed, turnName(turnState()),
+                    charging ? "是" : "否", pushCount));
             for (int i = 0; i < 2; i++) {
                 CamSide cs = sides[i];
                 if (cs.player != null) {
@@ -738,9 +753,9 @@ public class OverlayService extends Service {
                 if (a.length > 25) socPct = a[25];
                 break;
             case ID_PDU_OPER_PRM:
-                if (a.length > 13) {
+                if (a.length > 15) {
                     pduVolt = a[8] / 10f;
-                    pduCur = a[0] * PDU_CURRENT_SCALE;
+                    pduCur = a[15] * PDU_CURRENT_SCALE;   // 电流在 [15]，不是 [0]
                     kwPdu = pduVolt * pduCur / 1000f;
                 }
                 break;
