@@ -136,6 +136,9 @@ public class OverlayService extends Service {
         if (closing) return;
         closing = true;
         Log.i(TAG, "[life] 闭锁（背光灭）→ 关闭服务：释放摄像头 / 卸窗口 / 撤前台通知");
+        // 关键：把界面也收掉。否则解锁时 Android 会恢复"上锁前最前面的界面"，把我们弹出来。
+        // 收掉之后解锁只会看到桌面，而我们自己在后台被无障碍服务安静地拉起来。
+        try { MainActivity.finishIfOpen(); } catch (Throwable ignored) {}
         stopSelf();     // onDestroy 会释放摄像头、卸窗口、停线程、反注册接收器
     }
 

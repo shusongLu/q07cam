@@ -97,6 +97,7 @@ public class MainActivity extends Activity {
         applyPalette();
         super.onCreate(savedInstanceState);
         Prefs.migrate(this);
+        instRef = new java.lang.ref.WeakReference<>(this);
 
         LinearLayout rootAll = new LinearLayout(this);
         rootAll.setOrientation(LinearLayout.VERTICAL);
@@ -210,6 +211,38 @@ public class MainActivity extends Activity {
         super.onPause();
         OverlayService.setUiForeground(false);
         ui.removeCallbacks(tick);        // 界面不可见就别刷了
+    }
+
+    // ---------------------------------------------------------------- 闭锁时关掉自己的界面
+
+    /**
+     * 当前打开的界面实例。
+     *
+     * 为什么需要它：Android 在解锁时会**恢复上锁前最前面的界面**。如果闭锁时正好停在
+     * 我们 App 上，解锁就会把我们弹出来 —— 而用户想看到的是桌面。所以闭锁时由服务
+     * 调 {@link #finishIfOpen()} 把界面收掉，解锁时系统就没得可恢复。
+     *
+     * 注意：后台服务（悬浮窗/数据）不受影响，仍由无障碍服务在解锁后拉起。
+     */
+    private static java.lang.ref.WeakReference<MainActivity> instRef;
+
+    static void finishIfOpen() {
+        final MainActivity a = (instRef == null) ? null : instRef.get();
+        if (a == null) return;
+        a.runOnUiThread(new Runnable() {
+            @Override public void run() {
+                try {
+                    a.finish();
+                    Log.i(TAG, "[life] 闭锁：已关闭本界面（避免解锁时被系统恢复出来）");
+                } catch (Throwable ignored) {}
+            }
+        });
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (instRef != null && instRef.get() == this) instRef = null;
+        super.onDestroy();
     }
 
     private void switchTab(int idx) {
