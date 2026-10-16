@@ -53,16 +53,47 @@ doClean(Context):
 
 ## 所以：还有第三个机制（未定）
 
-systemui 的两个 cleaner 都排除了。剩下最可能的是车机的
-**「睡眠呵护」/「超级省电模式」** —— 车机设置里存在这些文案（见 `recon/autostart-wake.md` 引用）：
+systemui 的两个 cleaner 都排除了。第三个机制的特征：
+- 调用方是 **systemui**（`am_kill ... due to from pid 1450`）
+- **连无关应用都停**（天气、用户自己的应用管理）→ 不是"按特定名单停"，更像"**停所有非系统应用**"
+- 且**连前台服务也没保住我们**（`CAMemoryCleanerManager` 只杀 importance>200 的，前台服务=125 本应豁免）
+
+scenepower 侧的特征：
+- 它管理的是**深度睡眠/关机/一键睡眠**：`DEEP_SLEEP_ENTRY/EXIT`、`SLEEP_IMMEDIATELY`、
+  `SET_ONE_KEY_TO_SLEEP`、`EVENT_POWER_OFF_ENABLE`、`SOC_POWER_OFF_SLEEP_SIGN`
+- 它有 **`tryKillProcess()`** 和 `killProcess` / `removeTask:`
+- 它的白名单三处来源**全只读**：
+  | 来源 | 状态 |
+  |---|---|
+  | `/system/etc/packageName.json` | **不存在**（/system 只读）|
+  | `/system/etc/packageName.xml` | **不存在** |
+  | APK 内 assets | **没有**（APK 只有 META-INF/manifest/dex/arsc）|
+  | `WhiteListPath.whitePackages`（硬编码 String[]）| 代码里改不了 |
+
+⚠️ 若那两处 system 文件不存在导致 `whitePackages` **为空**，那 scenepower 侧就是"**没有白名单 → 全杀**"，
+与"天气和用户的 App 都被杀"吻合。
+
+## ★ 唯一有操作空间的线索：换个包名
+
+`recon/install-bypass.md` 记录 CAKJ 的安装许可名单只有 5 个名额、3 个已被系统应用占用：
 
 ```
-睡眠呵护 / 添加睡眠呵护应用
-超级省电模式 / 开启了超级省电，应用关闭
-添加到白名单
+com.changan.acscenter           ← 未安装（空位）★
+com.incall.apps.intelligenthmi  ← 已装
+com.incall.apps.softmanager     ← 已装
+com.incall.submasterservice     ← 已装
+de.dsa.ford.otaflash            ← 我们正在用（另一个空位）
 ```
 
-注意「**开启了超级省电，应用关闭**」—— 这条路**很可能无视前台服务**，直接关应用 ✗。
+而 **`com.changan.acscenter` 这个名字也出现在 scenepower 的字符串里**（`pm path` 实测未安装）。
+
+→ **把 applicationId 改成 `com.changan.acscenter`**：
+- CAKJ 安装校验 ✓（在许可名单且是空位）
+- 若它确实在 scenepower/systemui 的豁免名单里 → **锁车不再被杀** ✓
+- 可逆（改回去即可）
+
+**这是一个便宜的、可逆的实测**，值得先试。若无效，则说明这台车是"**闭锁时停掉所有非系统应用**"的既定策略，
+应用侧无解（只能靠厂商白名单 / OTA / 商店版）。
 
 ## ⚠️ 一条硬规矩（本次踩坑）
 
