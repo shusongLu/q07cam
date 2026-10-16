@@ -101,17 +101,12 @@ public class OverlayService extends Service {
     private volatile boolean alive = false;
 
     /**
-     * 关屏/闭锁 → **彻底休眠**：释放摄像头（RTSP + 解码器），两个轮询线程在锁上阻塞，
-     * 看门狗/重绘也放慢 —— 目标是把休眠期间的唤醒与 CPU 压到接近 0，不给车机耗电。
-     * 亮屏/解锁 → 唤醒并恢复。
-     *
-     * 为什么由我们自己睡而不是让车机杀：车机闭锁确实会停掉应用（省电），
-     * 但被 force-stop 后平台层面再也叫不回来（见 recon/lock-kill-mechanism.md）。
-     * 现在这个包名在车机的豁免名单里、不会被停，所以我们**有能力**用"自己睡"换
-     * "解锁自动回来" —— 两全。
+     * 闭锁（车机是关背光，不是 Android 关屏）→ **彻底关闭本服务**：
+     * 释放摄像头（RTSP + 解码器）、卸掉悬浮窗、撤销前台服务通知、停掉所有线程与定时器。
+     * 解锁由 `Q07A11yService`（无障碍服务，系统会一直绑定着）收到窗口事件后重新拉起 ——
+     * 所以闭锁期间我们不留任何轮询/通知/窗口，只留那个空闲的无障碍组件。
      */
-    private volatile boolean slept = false;
-    private final Object sleepLock = new Object();
+    private volatile boolean closing = false;
     private BroadcastReceiver screenReceiver;
 
     /** 车机的"关屏"是关背光（见 recon/lock-kill-mechanism.md），不走 Android 电源状态，
@@ -137,30 +132,11 @@ public class OverlayService extends Service {
         }
     }
 
-    private void enterSleep() {
-        if (slept) return;
-        slept = true;
-        Log.i(TAG, "[sleep] 关屏（背光灭）→ 休眠：释放摄像头、停轮询");
-        try { releaseCameras(); } catch (Throwable ignored) {}
-    }
-
-    private void exitSleep() {
-        if (!slept) return;
-        slept = false;
-        Log.i(TAG, "[sleep] 亮屏（背光回）→ 唤醒：恢复摄像头与轮询");
-        synchronized (sleepLock) { sleepLock.notifyAll(); }
-        try { setupPreconnect(); updateCamera(); } catch (Throwable ignored) {}
-    }
-
-    /** 休眠时在这里阻塞；每 2 秒瞄一眼背光 sysfs（一次文件读，代价可忽略），背光回来就醒。
-     *  不用轮询 SOA/HIDL，所以休眠期间几乎没有 CPU 与 binder 往返。 */
-    private void awaitAwake() {
-        synchronized (sleepLock) {
-            while (slept && alive) {
-                try { sleepLock.wait(2000L); } catch (InterruptedException e) { return; }
-                if (slept && alive && !backlightOff()) { exitSleep(); return; }
-            }
-        }
+    private void shutdownForLock() {
+        if (closing) return;
+        closing = true;
+        Log.i(TAG, "[life] 闭锁（背光灭）→ 关闭服务：释放摄像头 / 卸窗口 / 撤前台通知");
+        stopSelf();     // onDestroy 会释放摄像头、卸窗口、停线程、反注册接收器
     }
 
     private WindowManager wm;
@@ -333,8 +309,7 @@ public class OverlayService extends Service {
             screenReceiver = new BroadcastReceiver() {
                 @Override public void onReceive(Context c, Intent i) {
                     String a = i == null ? null : i.getAction();
-                    if (Intent.ACTION_SCREEN_OFF.equals(a)) enterSleep();
-                    else exitSleep();
+                    if (Intent.ACTION_SCREEN_OFF.equals(a)) shutdownForLock();
                 }
             };
             registerReceiver(screenReceiver, sf);
@@ -347,8 +322,7 @@ public class OverlayService extends Service {
         new Thread(new Runnable() {
             @Override public void run() {
                 while (alive) {
-                    if (!slept && backlightOff()) enterSleep();  // 车机关屏=关背光，收不到 SCREEN_OFF
-                    if (slept) { awaitAwake(); continue; }       // ★ 休眠：完全不轮询
+                    if (backlightOff()) { shutdownForLock(); return; }   // 闭锁=背光灭 → 关掉自己
                     boolean need = needTurn();
                     if (need) pollTurn();
                     // 60ms → 90ms：打灯发现延迟 +30ms 基本无感，但少了 1/3 的 HIDL 往返
@@ -361,8 +335,7 @@ public class OverlayService extends Service {
         new Thread(new Runnable() {
             @Override public void run() {
                 while (alive) {
-                    if (!slept && backlightOff()) enterSleep();  // 车机关屏=关背光，收不到 SCREEN_OFF
-                    if (slept) { awaitAwake(); continue; }       // ★ 休眠：完全不轮询
+                    if (backlightOff()) { shutdownForLock(); return; }   // 闭锁=背光灭 → 关掉自己
                     poll();
                     try { Thread.sleep(2000L); } catch (InterruptedException e) { return; }
                 }
@@ -372,24 +345,27 @@ public class OverlayService extends Service {
         // 界面节拍：只做摄像头窗口切换（很轻），100ms 保证打灯响应
         handler.post(new Runnable() {
             @Override public void run() {
-                if (!slept) updateCamera();
-                handler.postDelayed(this, slept ? 2000L : 100L);
+                if (closing) return;
+                updateCamera();
+                handler.postDelayed(this, 100L);
             }
         });
 
         // 看门狗：每秒体检一次（SOA 自愈 / 摄像头重连）
         handler.post(new Runnable() {
             @Override public void run() {
-                if (!slept) healthCheck();
-                handler.postDelayed(this, slept ? 10000L : 1000L);
+                if (closing) return;
+                healthCheck();
+                handler.postDelayed(this, 1000L);
             }
         });
 
         // 数据面板：400ms 一次，且文本没变就不 setText（避免无谓重绘）
         handler.post(new Runnable() {
             @Override public void run() {
-                if (!slept) render();
-                handler.postDelayed(this, slept ? 5000L : 400L);
+                if (closing) return;
+                render();
+                handler.postDelayed(this, 400L);
             }
         });
         running = true;
@@ -402,7 +378,6 @@ public class OverlayService extends Service {
         alive = false;
         try { if (screenReceiver != null) unregisterReceiver(screenReceiver); } catch (Throwable ignored) {}
         screenReceiver = null;
-        synchronized (sleepLock) { sleepLock.notifyAll(); }   // 唤醒阻塞的轮询线程让它们退出
         for (int i = 0; i < 2; i++) {
             stopPlayer(i);
             CamSide s = sides[i];
@@ -734,11 +709,11 @@ public class OverlayService extends Service {
         if (now - lastLogAt > 10000L) {
             lastLogAt = now;
             Log.i(TAG, String.format(Locale.US,
-                    "kw=%s packV=%.1f hv=%.0f soc=%.0f range=%.0f odo=%.0f gear=%s spd=%.1f turn=%s chg=%s bl=%d slept=%s [推送累计 %d]",
+                    "kw=%s packV=%.1f hv=%.0f soc=%.0f range=%.0f odo=%.0f gear=%s spd=%.1f turn=%s chg=%s bl=%d closing=%s [推送累计 %d]",
                     powerKnown ? String.format(Locale.US, "%.2f", kwPdu) : "n/a",
                     packVolt, hvVolt, socPct, rangeKm, totalKm,
                     gearName(gear, gearInvalid), speed, turnName(turnState()),
-                    charging ? "是" : "否", blRaw(), slept ? "是" : "否", pushCount));
+                    charging ? "是" : "否", blRaw(), closing ? "是" : "否", pushCount));
             for (int i = 0; i < 2; i++) {
                 CamSide cs = sides[i];
                 if (cs.player != null) {

@@ -43,9 +43,24 @@ public class Q07A11yService extends AccessibilityService {
     public void onInterrupt() {
     }
 
+    /** 车机闭锁=关背光（不走 Android 电源状态）。闭锁期间别把服务拉起来，否则会"起来→关掉"反复循环。 */
+    private static final String BL_POWER_PATH = "/sys/class/backlight/panel0/bl_power";
+
+    private boolean backlightOff() {
+        try {
+            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(BL_POWER_PATH));
+            String l = r.readLine();
+            r.close();
+            return l != null && Integer.parseInt(l.trim()) != 0;
+        } catch (Throwable t) {
+            return false;      // 读不到就当亮着
+        }
+    }
+
     /** 保证悬浮窗服务在跑。 */
     private void kick(String why) {
         if (OverlayService.running) { return; }
+        if (backlightOff()) { return; }        // ★ 闭锁中：不拉起来（起来也会立刻关掉）
         long now = System.currentTimeMillis();
         if (now - lastKick < KICK_GAP_MS) { return; }
         lastKick = now;
