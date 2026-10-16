@@ -114,26 +114,51 @@ public class OverlayService extends Service {
     private final Object sleepLock = new Object();
     private BroadcastReceiver screenReceiver;
 
+    /** 车机的"关屏"是关背光（见 recon/lock-kill-mechanism.md），不走 Android 电源状态，
+     *  所以 mWakefulness/Display State 一直是 ON、ACTION_SCREEN_OFF 也永远不发。
+     *  这个 sysfs 是 **世界可读** 的（-rw-r--r--），是唯一可靠的关屏信号。 */
+    private static final String BL_POWER_PATH = "/sys/class/backlight/panel0/bl_power";
+
+    /** 背光是否已关（0 = FB_BLANK_UNBLANK 亮，其余 = 灭）。读不到就当亮着，别误睡。 */
+    private boolean backlightOff() {
+        return blRaw() != 0;
+    }
+
+    /** 读背光原始值；-1 = 读不到。 */
+    private int blRaw() {
+        try {
+            java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(BL_POWER_PATH));
+            String l = r.readLine();
+            r.close();
+            if (l == null) return -1;
+            return Integer.parseInt(l.trim());
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
     private void enterSleep() {
         if (slept) return;
         slept = true;
-        Log.i(TAG, "[sleep] 关屏 → 休眠：释放摄像头、停轮询");
+        Log.i(TAG, "[sleep] 关屏（背光灭）→ 休眠：释放摄像头、停轮询");
         try { releaseCameras(); } catch (Throwable ignored) {}
     }
 
     private void exitSleep() {
         if (!slept) return;
         slept = false;
-        Log.i(TAG, "[sleep] 亮屏 → 唤醒：恢复摄像头与轮询");
+        Log.i(TAG, "[sleep] 亮屏（背光回）→ 唤醒：恢复摄像头与轮询");
         synchronized (sleepLock) { sleepLock.notifyAll(); }
         try { setupPreconnect(); updateCamera(); } catch (Throwable ignored) {}
     }
 
-    /** 休眠时在这里阻塞等待被唤醒 —— 不轮询、不唤醒内核，耗电≈0。 */
+    /** 休眠时在这里阻塞；每 2 秒瞄一眼背光 sysfs（一次文件读，代价可忽略），背光回来就醒。
+     *  不用轮询 SOA/HIDL，所以休眠期间几乎没有 CPU 与 binder 往返。 */
     private void awaitAwake() {
         synchronized (sleepLock) {
             while (slept && alive) {
-                try { sleepLock.wait(); } catch (InterruptedException e) { return; }
+                try { sleepLock.wait(2000L); } catch (InterruptedException e) { return; }
+                if (slept && alive && !backlightOff()) { exitSleep(); return; }
             }
         }
     }
@@ -322,6 +347,7 @@ public class OverlayService extends Service {
         new Thread(new Runnable() {
             @Override public void run() {
                 while (alive) {
+                    if (!slept && backlightOff()) enterSleep();  // 车机关屏=关背光，收不到 SCREEN_OFF
                     if (slept) { awaitAwake(); continue; }       // ★ 休眠：完全不轮询
                     boolean need = needTurn();
                     if (need) pollTurn();
@@ -335,6 +361,7 @@ public class OverlayService extends Service {
         new Thread(new Runnable() {
             @Override public void run() {
                 while (alive) {
+                    if (!slept && backlightOff()) enterSleep();  // 车机关屏=关背光，收不到 SCREEN_OFF
                     if (slept) { awaitAwake(); continue; }       // ★ 休眠：完全不轮询
                     poll();
                     try { Thread.sleep(2000L); } catch (InterruptedException e) { return; }
@@ -707,11 +734,11 @@ public class OverlayService extends Service {
         if (now - lastLogAt > 10000L) {
             lastLogAt = now;
             Log.i(TAG, String.format(Locale.US,
-                    "kw=%s packV=%.1f hv=%.0f soc=%.0f range=%.0f odo=%.0f gear=%s spd=%.1f turn=%s chg=%s [推送累计 %d]",
+                    "kw=%s packV=%.1f hv=%.0f soc=%.0f range=%.0f odo=%.0f gear=%s spd=%.1f turn=%s chg=%s bl=%d slept=%s [推送累计 %d]",
                     powerKnown ? String.format(Locale.US, "%.2f", kwPdu) : "n/a",
                     packVolt, hvVolt, socPct, rangeKm, totalKm,
                     gearName(gear, gearInvalid), speed, turnName(turnState()),
-                    charging ? "是" : "否", pushCount));
+                    charging ? "是" : "否", blRaw(), slept ? "是" : "否", pushCount));
             for (int i = 0; i < 2; i++) {
                 CamSide cs = sides[i];
                 if (cs.player != null) {
