@@ -125,6 +125,23 @@ de.dsa.ford.otaflash            ← 我们正在用（另一个空位）
 - 无障碍与悬浮窗权限要重新授一次（`settings put secure enabled_accessibility_services` + `appops set ... SYSTEM_ALERT_WINDOW allow`）
 - 回滚：把 `build.gradle.kts` 的 `applicationId` 改回 `de.dsa.ford.otaflash` 重装即可
 
+### 副作用：第三方工具会把我们当"系统应用"
+
+包名变成 `com.changan.*` 后，按包名前缀分类的工具会**把我们归到厂商/系统应用**里 ✗ ——
+实测「应用管家」（`com.shusong.appmanagf`）的"用户应用"列表里**看不到我们**（旧名 `de.` 开头时可见）。
+要在里面操作，需要打开它的「显示系统应用 / 全部应用」之类的开关。
+
+**但 `WRITE_SECURE_SETTINGS` 不需要应用管家** —— 它是 `signature|privileged|**development**` 级别，
+带 `development` 就可以用 adb 直接授：
+
+```bash
+adb shell pm grant com.changan.acscenter android.permission.WRITE_SECURE_SETTINGS
+# 验证
+adb shell dumpsys package com.changan.acscenter | grep WRITE_SECURE_SETTINGS   # granted=true
+```
+
+（重装后需要重新授一次。）
+
 ## ⚠️ 一条硬规矩（本次踩坑）
 
 **禁止用 adb 发 `keyevent 223`(SLEEP)** —— 车机关屏时会连 Wi-Fi/ADB 一起断，
