@@ -4,9 +4,18 @@
 
 ## 结论速览
 
-**车机卡顿 = CPU 争用引起的线程风暴**，元凶是**厂商预装的常驻系统应用**，
-不是我们的 App（我们 CPU 10~12%、上下文切换约占 1.3% ≈ 1,159 次/秒）。
-**头号单一来源是 `android.hardware.audio.service`（26,005 次/秒 ≈ 内核总量的 30%）。**
+**车机卡顿 = CPU 争用**，元凶是**厂商预装的常驻系统应用**，
+不是我们的 App（我们 CPU 11.6%、上下文切换约占 1.3%）。
+
+⚠️ 注意区分两个排行（**切换数第一 ≠ CPU 第一**）：
+
+| 口径 | 第一名 | 第二~五名 |
+|---|---|---|
+| **CPU（决定卡顿）** | navi 44.2% | sdkservice 36.2% / speechassistant 34.2% / soabridge 33.0% / dms 18.3% |
+| **上下文切换数** | audio.service 26,900/秒（29.5%）| soabridge 4,027 / sdkservice 1,407 / **我们 1,289** / surfaceflinger 1,136 |
+
+audio.service 切换数最多，但**只烧 11.9% 单核**（一次切换约 3 µs）；
+真正吃掉 CPU 的是导航/SDK/语音助手。两者都要看，但**定"卡顿元凶"应以 CPU 为准**。
 
 | 指标 | 实测 | 正常参考 | 判定 |
 |---|---|---|---|
@@ -33,6 +42,25 @@
 | vendor.hardware.g2d / surfaceflinger / audio | 14% / 6.8% / 14% | 13% / — / 10% | 图形与音频 |
 | caevsserver / evs.appservice | 17% / 8.5% | 10% / 10% | EVS 相机 |
 | **de.dsa.ford.otaflash（我们）** | **11%** | **10%** | ✓ 第 6~8 位 |
+
+### 第三次（口径已修正，10 秒窗口，进程级 stat）
+
+```
+整机忙时 = 62.6% of 6 cores = 3.76 核          ← 与第一/二轮的 62% 吻合
+
+  44.2%  com.incall.apps.navi.service
+  36.2%  com.incall.apps.sdkservice
+  34.2%  com.incall.apps.speechassistant
+  33.0%  android.hardware.automotive.soabridge@1.0-service
+  18.3%  com.desaysv.ivi.dms
+  16.6%  com.incall.apps.sdalauncher
+  11.9%  android.hardware.audio.service
+  11.6%  de.dsa.ford.otaflash            ← 我们
+   2.6%  com.incall.app.sdamediaservice
+   1.8%  com.incall.apps.sdkservice:service2
+  -------
+  210.4% 合计（单核）= 整机 3.76 核忙时的 56%
+```
 
 ## 上下文切换归因（20 秒窗口，含全部线程）
 
@@ -73,15 +101,49 @@
      646 /秒   com.incall.apps.speechassistant
 ```
 
-### audio.service 异常（核心结论）
+### audio.service 的两个常驻空转线程（已定位到线程级）
 
-- 精确值 **26,005 次/秒**；遍历口径高估到 42,187，量级一致，结论不变。
-- `dumpsys media.audio_flinger`：只有 **1 条活跃输出轨**，且 `framesWritten`
-  15 分钟才增加约 100 万帧（≈1000 帧/秒）。
-- **这点音量不可能需要 26,000 次/秒的上下文切换**（48kHz/240 帧缓冲的正常量级约 200 次/秒，
-  差了 **两个数量级**）→ 高度怀疑厂商音频 HAL 存在**自旋/高频唤醒**，
-  且很可能被语音助手的常开录音驱动（`speechassistant` 自身只有 646 次/秒，
-  但它持有的录音流把开销转移到了 `audio.service` 上）。
+```
+android.hardware.audio.service (pid 404) ── 26,893 次/秒 = 内核总量 91,302 的 29.5%
+  ├─ audio_hal_cap   (tid 31410)   13,284 次/秒   采集
+  └─ audio_hal_ref   (tid 31411)   13,271 次/秒   参考信号（AEC 回采）
+     合计 ≈ 26,500 次/秒，CPU 仅 3.9% + 3.9% ≈ 8% 单核
+```
+
+- 对应的采集会话 `AudioIn_18E`（16kHz / 双声道 / 512 帧缓冲）
+  → 正常应约 **31 次填充/秒**，实际却折算成 **26,500 次切换/秒**，**差 850 倍**。
+- 这两个线程是**懒创建后永不退出的常驻工作线程**：`starttime` 显示约 1 小时前创建，
+  之后语音助手重启并开了**新**采集会话（`AudioIn_1AE`），**没有新建** cap/ref 线程。
+- 它们**与"当前是否在录音"脱钩**：两条采集会话都已 `Standby: yes` 时，仍在 24,500 次/秒。
+- 本质是厂商音频 HAL（`/vendor/lib64/hw/audio.primary.se1000.so`）的**高频轮询缺陷**
+  （不是忙等烧 CPU，是每 ~3 µs 一次的唤醒/睡眠循环）。
+
+### ❌ 实测证伪："关掉语音唤醒能解决"
+
+| 步骤 | `audio_hal_cap`+`ref` | 内核总切换 |
+|---|---|---|
+| 关闭前（语音助手运行中）| 22,787 次/秒 | 82,422 次/秒 |
+| `pm disable-user com.incall.apps.speechassistant` 后 | **24,548 次/秒** | 85,785 次/秒 |
+
+**语音助手被禁用、进程被杀、所有采集会话进入 standby，HAL 线程照旧空转。**
+→ "关语音唤醒"这条捷径**不成立**；该空转是 HAL 的固有行为。
+（已 `pm enable` 还原，包状态回到 healthy。）
+
+### 其他录音持有者（均已排除为主因）
+
+| pid | 进程 | 备注 |
+|---|---|---|
+| 1807 | `com.incall.apps.sdkservice:service2` | 有 AudioRecord 线程，但仅 1.8% CPU / 157 切换/秒 |
+| 3471 | `com.changan.evs.appservice` | RecordMonitor（EVS 录像）|
+| 567 | `/system/bin/canomicservice`（root）| 线程 `NomicRecordThre` |
+| 1087 | `system_server` | SessionRecordTh |
+| 1539 | `com.incall.app.sdamediaservice` | 持有常开输出轨（44.1kHz/MEDIA），仅 2.6% CPU |
+
+### 能否修掉？—— 不能
+
+- `adb root` 被禁（`ro.secure=1`、production build）→ 无法 `setprop ctl.restart vendor.audio-hal`。
+- HAL 位于 `/vendor`，非 root 不可改。
+- 唯一理论途径是**重启音频 HAL**（销毁这两个线程），但需要 root 或厂商 OTA。
 
 ## ⚠️ 方法论纠正（重要）
 
@@ -91,12 +153,28 @@
 - 举例：我们 App 按错误口径得出 "15 次/秒（占 0.02%）"，按正确口径是 **约 1,159 次/秒（约 1.3%）**。
 - 遍历口径会**系统性高估**（增量跨越了遍历耗时），定稿数字一律以设备端精确计时为准。
 
+### CPU 口径纠正（第二次踩坑）
+
+- 测进程 CPU **必须用进程级 `/proc/<pid>/stat`**（字段 14+15），
+  **不能**遍历 `/proc/<pid>/task/*/stat` 求和。
+- 原因：进程级 stat 是**线程组累计时间，包含已退出线程**，而 `task/` 只列活线程。
+- 例：`audio.service` 进程级 = 219,933 ticks，但 24 个活线程求和只有 33,152（**差 6.6 倍**）。
+- 错误口径会得出"各进程合计 685%"这种**超过整机 600%** 的荒谬结果；
+  正确口径下被测 10 个进程合计 210.4%（单核），整机忙时 3.76 核（62.6%），逻辑自洽。
+- HZ 已确认 = **100**（`getconf CLK_TCK`）。
+- 真实整机忙时可用 `/proc/stat` 的 `(total - idle - iowait)` 增量比算出，**不需要 HZ**。
+
 ## 可行动项（按收益）
 
-| # | 动作 | 预计收益 | 代价 |
-|---|---|---|---|
-| 1 | 车机设置里关掉**语音唤醒** | 可能消掉 audio.service 26k 切换的大头 | 失去语音唤醒 |
-| 2 | 不用时清掉**导航**后台 | 40~44% CPU | 导航不可用 |
-| 3 | 关掉舱内 **DMS** 监控 | 7~30% CPU | 失去疲劳监测 |
-| 4 | 我们：双路预连 → 只预连一侧 | ~5% CPU | 另一侧打灯要重连 |
-| 5 | 处理 logcollector（厂商日志上传）| ~7% CPU | 无 |
+| # | 动作 | 预计收益 | 代价 | 状态 |
+|---|---|---|---|---|
+| ~~1~~ | ~~关掉**语音唤醒**~~ | ~~消掉 audio.service 26k 切换~~ | — | ❌ **实测无效，已证伪** |
+| 1 | 清掉**导航**后台 | 44% CPU（最大头）| 导航不可用 | 未测 |
+| 2 | 关掉 **sdkservice / 语音助手** | 34~36% CPU | 语音/SDK 功能失效 | 未测 |
+| 3 | 关掉舱内 **DMS** 监控 | 18% CPU | 失去疲劳监测 | 未测 |
+| 4 | 我们：双路预连 → 只预连一侧 | ~5% CPU | 另一侧打灯要重连 | 可选 |
+
+> 结论：**能真正降 CPU 的都是厂商预装应用，关掉就失去对应功能。**
+> audio.service 那 26.9k 切换/秒修复不了（要 root 或 OTA），
+> 且它只占 11.9% 单核 —— 即使修掉也解决不了卡顿。
+> 我们的 App（11.6%）在 CPU 排行第 7~8 位，不是原因。
