@@ -42,6 +42,38 @@ Crashed services:{{de.dsa.ford.otaflash/com.lushu.q07car.Q07A11yService}}
 - `dumpsys deviceidle whitelist` —— 已加白，仍被杀
 - 「应用管家」—— 它自己也一样会被杀（`has died: prcp IMPF`），不是它干的
 
+## ⚠️ 2026-10-17 教训：**不要用 adb 发 SLEEP**
+
+为了"远程复现关屏"，我执行了：
+
+```bash
+adb shell input keyevent 223     # KEYCODE_SLEEP
+```
+
+结果：**车机把 Wi-Fi/ADB 一起断了**，之后：
+
+| 现象 | 含义 |
+|---|---|
+| `adb connect` 报 **10060（超时）** | 网络层不通 |
+| 再试报 **10061（积极拒绝）** | 网络回来了，但 5555 没人监听 |
+
+而 SLEEP 之后我**再也发不出 `keyevent 224`(WAKEUP)** —— 因为 adb 已经断了。
+**结果：车机停在关屏状态，只能整车重启才恢复。**
+
+### 规矩（写死）
+
+1. **禁止用 adb 发 `keyevent 223`(SLEEP) / `26`(POWER)** —— 一旦关屏就失去控制面。
+2. 要测"关屏/闭锁"必须**物理操作**（车钥匙闭锁），并**由人**解锁唤醒。
+3. 需要"屏幕关了会怎样"的答案，用**离线分析**（逆 scenepower/systemui）或**事后读取**
+   （等人解锁后再 `dumpsys package ... stopped=`），不要自己把屏幕关掉。
+
+### 顺带确认了一件事
+
+**车机在关屏时连网络一起断** —— 这正好解释了它为什么要 force-stop 后台应用：
+关屏后 Wi-Fi/车网都不可用，后台那些轮询/收流的进程纯属耗电。
+
+---
+
 ## 车机侧的开关（下一步）
 
 系统组件：`com.incall.scenepower`（`/system/app/IncallScenePower`，SYSTEM+PERSISTENT），
