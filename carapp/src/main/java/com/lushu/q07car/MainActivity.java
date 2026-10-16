@@ -96,6 +96,7 @@ public class MainActivity extends Activity {
                 : android.R.style.Theme_Material_Light_NoActionBar);
         applyPalette();
         super.onCreate(savedInstanceState);
+        Prefs.migrate(this);
 
         LinearLayout rootAll = new LinearLayout(this);
         rootAll.setOrientation(LinearLayout.VERTICAL);

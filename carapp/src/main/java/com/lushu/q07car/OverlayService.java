@@ -200,6 +200,7 @@ public class OverlayService extends Service {
         handler = new Handler(Looper.getMainLooper());
 
         loadScale();
+        Prefs.migrate(this);
         loadPrefs();
 
         tvMain = new TextView(this);

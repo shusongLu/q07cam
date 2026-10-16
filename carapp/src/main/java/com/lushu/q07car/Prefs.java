@@ -40,7 +40,12 @@ public class Prefs {
 
     // 默认布局
     public static final int DEF_PANEL_X = 470, DEF_PANEL_Y = 170, DEF_PANEL_W = 1040, DEF_PANEL_H = 560;
-    public static final int DEF_CAM_X = 470, DEF_CAM_Y = 745, DEF_CAM_W = 720, DEF_CAM_H = 405;
+    public static final int DEF_CAM_X = 470, DEF_CAM_Y = 745, DEF_CAM_W = 960, DEF_CAM_H = 540;
+
+    // 旧默认值（用于一次性迁移，见 migrate()）
+    private static final int DEF_CAM_W_OLD = 720, DEF_CAM_H_OLD = 405;
+    private static final String KEY_LAYOUT_V = "layout_v";
+    private static final int LAYOUT_V = 2;
 
     public static SharedPreferences get(Context c) {
         return c.getSharedPreferences(NAME, Context.MODE_PRIVATE);
@@ -68,6 +73,28 @@ public class Prefs {
 
     public static void putStr(Context c, String key, String v) {
         get(c).edit().putString(key, v).apply();
+    }
+
+    /**
+     * 一次性布局迁移。
+     *
+     * 摄像头窗口旧的默认尺寸是 720x405，而拉到的流是 1920x1080 —— 清晰度只用掉一小半。
+     * 放大窗口本身**不增加 CPU**（TextureView 每帧合成开销与窗口尺寸无关，已实测），
+     * 所以把默认值提到 960x540。只在"用户没自己改过"（存的还是旧默认值）时动它。
+     */
+    public static void migrate(Context c) {
+        SharedPreferences p = get(c);
+        int v;
+        try { v = p.getInt(KEY_LAYOUT_V, 0); } catch (Throwable t) { v = 0; }
+        if (v >= LAYOUT_V) return;
+
+        SharedPreferences.Editor e = p.edit();
+        int w = p.getInt(KEY_CAM_W, DEF_CAM_W_OLD);
+        int h = p.getInt(KEY_CAM_H, DEF_CAM_H_OLD);
+        if (w == DEF_CAM_W_OLD && h == DEF_CAM_H_OLD) {
+            e.putInt(KEY_CAM_W, DEF_CAM_W).putInt(KEY_CAM_H, DEF_CAM_H);
+        }
+        e.putInt(KEY_LAYOUT_V, LAYOUT_V).apply();
     }
 
     /** 位置/大小恢复默认。 */
