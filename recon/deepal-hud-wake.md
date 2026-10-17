@@ -123,7 +123,69 @@ doDaemon(String enabledServices) {
 
 **不借**：当 Launcher（我们的定位不是替换桌面）。
 
-## 五、上车后的检查清单
+## 六、第二个样本：领克「小地图服务」（cn.navitool.service 1.0.6）
+
+样本：`5. 小地图服务-1.0.6-HUD小地图必装.apk`（84.6 MB）
+
+### 它是什么
+
+**一个纯服务 App** —— 49 个类、**零权限**、无 UI：
+
+```
+service cn.navitool.service.hud.HudMapService      action cn.navitool.hud.service.BIND
+service cn.navitool.service.hud.HudMapServiceV2    action cn.navitool.hud.service.V2.BIND
+```
+
+### 内容构成（84 MB 的真相）
+
+```
+62.15 MB  lib/arm64-v8a/libnavitool_hud_runtime.so     ← HUD 小地图引擎（原生）
+50.65 MB  assets/runtime/arm64-v8a/hud-runtime-arm64   ← 同一引擎的原始副本
+ 0.14 MB  classes.dex                                   ← Java 层很薄
+     0 KB  res/jL.pem                                    ← 内嵌的"受信任调用方"证书
+```
+
+### 机制：**下发运行时**，不是自己画
+
+```java
+// V1
+writeRuntimeAsset(ParcelFileDescriptor)        // 把引擎通过管道写给调用方
+dispatchMessage(String) / dispatchState(int, String)
+enforceTrustedCaller()
+LegacyHookMessageFirewall                      // 消息防火墙
+
+// V2
+createSessionInternal(int, int, int, ParcelFileDescriptor,
+                      String, String, HudRuntimeSessionOptions, IHudRuntimeCallbackV2)
+HudArtifactKeyManager / ArtifactManifestVerifier / ArtifactTransferProcessor
+ArtifactPipeReader
+HudTargetProcessInspector / HudTargetProcessPolicy
+readNaviToolSigningCertificateDigests() / sha256()
+activeSession / V2Session / HudRuntimeSessionCoordinator
+```
+
+流程大致是：**受信任的调用方（HUD 侧）绑定 → 签名校验 → 建会话 → 通过管道拿到引擎 →
+在自己的进程里跑 HUD 小地图**。
+
+**鉴权是硬门槛**：`enforceTrustedCaller()` + 内嵌 PEM 证书 + 进程校验 + 消息防火墙 ✗
+→ 第三方 App 绑上去也会被拒。
+
+## 三个样本对比
+
+| | 深蓝 `com.deepalhome.launcher` | 领克 `cn.navitool.service` | 我们（Q07） |
+|---|---|---|---|
+| 身份 | **桌面替代（HOME）** | 纯服务（无权限/无 UI） | 普通第三方 App |
+| HUD 做法 | **往一块 Display 画**（按分辨率识别，必要时建 VirtualDisplay） | **下发原生引擎**（62MB .so）给受信任调用方 | ? |
+| 通信 | 直接渲染 | AIDL 会话 + `ParcelFileDescriptor` 管道 | — |
+| 门槛 | 必须是 Launcher ✗ | **签名白名单** ✗ | — |
+| 能借的 | **HUD = Display** 这个思路 ✓ | 工程化设计参考（会话/超时/防火墙）| — |
+
+**结论**：两家的 HUD 走的路子不同，但都是**厂商闭环** ✗。
+对我们唯一可能行的，是深蓝那条 —— **如果 Q07 暴露了 HUD display，就能直接画**（不需要特殊权限）。
+领克那条走不通（需要厂商签名）。
+
+## 七、上车后的检查清单
+
 
 1. `dumpsys display | grep -E 'DisplayDeviceInfo|mDisplayId'` → 列出所有 display 及分辨率
    - 找"小/扁"的那块 → 大概率是 HUD；`clusterDisplayId` 可能是仪表
