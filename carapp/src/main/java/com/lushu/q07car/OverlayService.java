@@ -256,62 +256,7 @@ public class OverlayService extends Service {
     /** START_STICKY：被系统回收后尽量自动重建。 */
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        // 临时探针：--es probe "1,3,10" 在各 display 上画整屏色块；--es probe "clear" 清掉。
-        // 用途：确认车机哪一块 display 是 HUD（用户抬头看颜色即可）。
-        if (intent != null && intent.hasExtra("probe")) {
-            final String spec = intent.getStringExtra("probe");
-            handler.post(new Runnable() {
-                @Override public void run() { runProbe(spec); }
-            });
-        }
         return START_STICKY;
-    }
-
-    private final java.util.List<View> probeViews = new java.util.ArrayList<>();
-    private final java.util.List<WindowManager> probeWms = new java.util.ArrayList<>();
-
-    private void runProbe(String spec) {
-        for (int i = 0; i < probeViews.size(); i++) {
-            try { probeWms.get(i).removeView(probeViews.get(i)); } catch (Throwable ignored) {}
-        }
-        probeViews.clear();
-        probeWms.clear();
-        if (spec == null || spec.trim().isEmpty() || "clear".equalsIgnoreCase(spec.trim())) return;
-
-        DisplayManager dm = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
-        String[] parts = spec.split(",");
-        int[] colors = {0xFFFF3B30, 0xFF34C759, 0xFF0A84FF, 0xFFFFD60A};   // 红 绿 蓝 黄
-        for (int k = 0; k < parts.length; k++) {
-            int id;
-            try { id = Integer.parseInt(parts[k].trim()); } catch (Throwable t) { continue; }
-            try {
-                Display d = (dm == null) ? null : dm.getDisplay(id);
-                if (d == null) { Log.w(TAG, "[probe] display " + id + " 不存在"); continue; }
-                Context dc = createDisplayContext(d);
-                WindowManager w2 = (WindowManager) dc.getSystemService(Context.WINDOW_SERVICE);
-                TextView tv = new TextView(dc);
-                int color = colors[k % colors.length];
-                tv.setBackgroundColor(color);
-                tv.setText("Q07 PROBE\ndisplay " + id + "\n" + d.getWidth() + "x" + d.getHeight());
-                tv.setTextColor(0xFF000000);
-                tv.setTextSize(24f);
-                tv.setGravity(Gravity.CENTER);
-                WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                        WindowManager.LayoutParams.MATCH_PARENT,
-                        WindowManager.LayoutParams.MATCH_PARENT,
-                        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                        PixelFormat.TRANSLUCENT);
-                w2.addView(tv, lp);
-                probeViews.add(tv);
-                probeWms.add(w2);
-                Log.i(TAG, "[probe] 已画到 display " + id + " " + d.getWidth() + "x" + d.getHeight()
-                        + " color=0x" + Integer.toHexString(color));
-            } catch (Throwable t) {
-                Log.e(TAG, "[probe] display " + id + " 失败: " + t);
-            }
-        }
     }
 
     @Override
