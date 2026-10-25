@@ -35,8 +35,8 @@ android {
         applicationId = "com.changan.acscenter"
         minSdk = 30
         targetSdk = 30
-        versionCode = 20
-        versionName = "2.1"
+        versionCode = 26
+        versionName = "2.7"
 
         ndk {
             abiFilters += "arm64-v8a"

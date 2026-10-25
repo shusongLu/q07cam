@@ -1,6 +1,13 @@
 # Q07 车机 HUD/多屏架构与「能否把画面送到 HUD」
 
-> 结论先行：**HUD 由 QNX 侧渲染，Android 只能发「状态类」消息，没有画面通道。**
+> ⚠️ **2026-10-18 更新**：本文「Android 没有画面通道」的结论已被推翻一半。
+> 实测确认 **导航（`com.incall.apps.navi.service`，uid 1000）通过
+> `ws://172.16.119.2:10002` 持续向 HUD 盒子推送图像/命令数据**，
+> 发送函数 `CMapService::SendHUDData` 已定位到 `libMXNavi.so` 的 `0x90ABCC`。
+> 详见 **[hud-camera-feasibility.md](hud-camera-feasibility.md)**。
+> 本文其余关于「Android 侧没有 HUD 显示、HUD 不是 DISPLAY_TYPE_HUD」的结论仍然成立。
+
+> 结论先行（旧）：**HUD 由 QNX 侧渲染，Android 只能发「状态类」消息，没有画面通道。**
 
 ---
 

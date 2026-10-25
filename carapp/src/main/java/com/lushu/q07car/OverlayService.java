@@ -8,7 +8,11 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.hardware.display.DisplayManager;
+import android.view.Display;
 import android.graphics.Color;
+import android.graphics.Canvas;
+import android.graphics.Paint;
 import android.graphics.PixelFormat;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -190,6 +194,13 @@ public class OverlayService extends Service {
     /** 收到转向信号的时间，用来量"信号 -> 出画面"的延迟。 */
     private volatile long turnSignalAt = 0;
 
+    /**
+     * 用户点了摄像头窗口右上角的 ✕：
+     * 本次转向灯周期内不再自动弹出（灯真正熄灭后自动解除，下次打灯照常显示）。
+     */
+    private volatile int dismissedSide = -1;
+    private volatile boolean dismissedWaitOff = false;
+
     // ---------------- 摄像头（每侧一个窗口） ----------------
     // 预连：开机就把某侧（或双侧）的 RTSP 拉起来常驻，窗口放在屏幕外，
     // 打灯时只把窗口"移进来"，省掉 RTSP 握手 → 基本零延迟。
@@ -228,6 +239,8 @@ public class OverlayService extends Service {
         boolean started;
         /** 想要显示、但还没显形（在等第一帧）。 */
         boolean wantShow;
+        View closeBtn;          // 右上角 ✕（非编辑模式才有）
+        View resizeBtn;         // 右下角缩放把手（非编辑模式才有）
     }
 
     private final CamSide[] sides = new CamSide[]{new CamSide(), new CamSide()};
@@ -243,7 +256,62 @@ public class OverlayService extends Service {
     /** START_STICKY：被系统回收后尽量自动重建。 */
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // 临时探针：--es probe "1,3,10" 在各 display 上画整屏色块；--es probe "clear" 清掉。
+        // 用途：确认车机哪一块 display 是 HUD（用户抬头看颜色即可）。
+        if (intent != null && intent.hasExtra("probe")) {
+            final String spec = intent.getStringExtra("probe");
+            handler.post(new Runnable() {
+                @Override public void run() { runProbe(spec); }
+            });
+        }
         return START_STICKY;
+    }
+
+    private final java.util.List<View> probeViews = new java.util.ArrayList<>();
+    private final java.util.List<WindowManager> probeWms = new java.util.ArrayList<>();
+
+    private void runProbe(String spec) {
+        for (int i = 0; i < probeViews.size(); i++) {
+            try { probeWms.get(i).removeView(probeViews.get(i)); } catch (Throwable ignored) {}
+        }
+        probeViews.clear();
+        probeWms.clear();
+        if (spec == null || spec.trim().isEmpty() || "clear".equalsIgnoreCase(spec.trim())) return;
+
+        DisplayManager dm = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+        String[] parts = spec.split(",");
+        int[] colors = {0xFFFF3B30, 0xFF34C759, 0xFF0A84FF, 0xFFFFD60A};   // 红 绿 蓝 黄
+        for (int k = 0; k < parts.length; k++) {
+            int id;
+            try { id = Integer.parseInt(parts[k].trim()); } catch (Throwable t) { continue; }
+            try {
+                Display d = (dm == null) ? null : dm.getDisplay(id);
+                if (d == null) { Log.w(TAG, "[probe] display " + id + " 不存在"); continue; }
+                Context dc = createDisplayContext(d);
+                WindowManager w2 = (WindowManager) dc.getSystemService(Context.WINDOW_SERVICE);
+                TextView tv = new TextView(dc);
+                int color = colors[k % colors.length];
+                tv.setBackgroundColor(color);
+                tv.setText("Q07 PROBE\ndisplay " + id + "\n" + d.getWidth() + "x" + d.getHeight());
+                tv.setTextColor(0xFF000000);
+                tv.setTextSize(24f);
+                tv.setGravity(Gravity.CENTER);
+                WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                        PixelFormat.TRANSLUCENT);
+                w2.addView(tv, lp);
+                probeViews.add(tv);
+                probeWms.add(w2);
+                Log.i(TAG, "[probe] 已画到 display " + id + " " + d.getWidth() + "x" + d.getHeight()
+                        + " color=0x" + Integer.toHexString(color));
+            } catch (Throwable t) {
+                Log.e(TAG, "[probe] display " + id + " 失败: " + t);
+            }
+        }
     }
 
     @Override
@@ -522,6 +590,130 @@ public class OverlayService extends Service {
         }
     }
 
+    /**
+     * 正常模式下的直接操作：单指拖动移动窗口，双指捏合缩放（锁 16:9）。
+     * 只改摄像头自己的 cam_x/cam_y/cam_w/cam_h，与面板"编辑布局"的 panel_* 互不影响。
+     */
+    /** 自绘 ✕：笔画粗细可控（系统字体的"加粗"在车机上仍然偏细）。 */
+    private class CloseXView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        CloseXView(Context c) {
+            super(c);
+            setClickable(true);
+        }
+
+        @Override protected void onDraw(Canvas cv) {
+            int w = getWidth();
+            int h = getHeight();
+            float pad = dp(11);
+            float sx = w - pad;
+            float sy = h - pad;
+
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeWidth(dp(7f));
+            paint.setColor(0xAAFFFFFF);      // 66% 不透明
+            cv.drawLine(pad, pad, sx, sy, paint);
+            cv.drawLine(sx, pad, pad, sy, paint);
+        }
+    }
+
+    private class CamTouch implements View.OnTouchListener {
+        private float downX, downY;
+        private int startX, startY;
+        private boolean moved;
+
+        @Override public boolean onTouch(View v, MotionEvent e) {
+            WindowManager.LayoutParams lp = (WindowManager.LayoutParams) v.getLayoutParams();
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    downX = e.getRawX();
+                    downY = e.getRawY();
+                    startX = lp.x;
+                    startY = lp.y;
+                    moved = false;
+                    return true;
+                case MotionEvent.ACTION_POINTER_DOWN:
+                    // 开始双指：把拖动基准对齐当前，避免抬起一指时跳位
+                    downX = e.getRawX();
+                    downY = e.getRawY();
+                    startX = lp.x;
+                    startY = lp.y;
+                    return true;
+                case MotionEvent.ACTION_MOVE:
+                    if (e.getPointerCount() == 1) {
+                        int nx = startX + (int) (e.getRawX() - downX);
+                        int ny = startY + (int) (e.getRawY() - downY);
+                        int maxX = Math.max(0, getResources().getDisplayMetrics().widthPixels - lp.width);
+                        int maxY = Math.max(0, getResources().getDisplayMetrics().heightPixels - lp.height);
+                        nx = Math.max(0, Math.min(maxX, nx));
+                        ny = Math.max(0, Math.min(maxY, ny));
+                        if (nx != lp.x || ny != lp.y) {
+                            lp.x = nx;
+                            lp.y = ny;
+                            try { wm.updateViewLayout(v, lp); } catch (Throwable ignored) {}
+                            moved = true;
+                        }
+                    }
+                    return true;
+                case MotionEvent.ACTION_POINTER_UP:
+                    downX = e.getRawX();
+                    downY = e.getRawY();
+                    startX = lp.x;
+                    startY = lp.y;
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    if (moved) {
+                        camX = lp.x;
+                        camY = lp.y;
+                        saveCamLayout();
+                        Log.i(TAG, "[cam] 位置 -> " + camX + "," + camY);
+                    }
+                    return true;
+                default:
+                    return false;
+            }
+        }
+    }
+
+    /** 右下角把手：拖动改大小（锁 16:9），与 ✕ 同风格。 */
+    private class CamResize implements View.OnTouchListener {
+        private float downX;
+        private int startW;
+
+        @Override public boolean onTouch(View v, MotionEvent e) {
+            View box = (View) v.getParent();
+            WindowManager.LayoutParams lp = (WindowManager.LayoutParams) box.getLayoutParams();
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    downX = e.getRawX();
+                    startW = lp.width;
+                    return true;
+                case MotionEvent.ACTION_MOVE:
+                    int sw = getResources().getDisplayMetrics().widthPixels;
+                    int sh = getResources().getDisplayMetrics().heightPixels;
+                    int maxW = Math.min(sw, (int) (sh * CAM_ASPECT));
+                    int w = Math.max(dp(200), Math.min(maxW, startW + (int) (e.getRawX() - downX)));
+                    int h = Math.max(dp(112), (int) (w / CAM_ASPECT + 0.5f));
+                    lp.width = w;
+                    lp.height = h;
+                    try { wm.updateViewLayout(box, lp); } catch (Throwable ignored) {}
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    camW = lp.width;
+                    camH = lp.height;
+                    saveCamLayout();
+                    Log.i(TAG, "[cam] 尺寸 -> " + camW + "x" + camH);
+                    return true;
+                default:
+                    return false;
+            }
+        }
+    }
+
     private void startForegroundInternal() {
         NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm.getNotificationChannel(CH_ID) == null) {
@@ -669,6 +861,19 @@ public class OverlayService extends Service {
      */
     private int cameraTurn() {
         int t = showCamera ? turnState() : 0;
+
+        // ✕ 手动关闭：本次转向灯周期内保持隐藏；等 turnState() 回到 0（灯真的灭了）再解除。
+        if (dismissedWaitOff) {
+            if (t == 0) {
+                dismissedWaitOff = false;
+                dismissedSide = -1;
+                Log.i(TAG, "[cam] 转向灯已熄灭，恢复自动显示");
+            } else {
+                holdTurn = 0;          // 不走"灭灯延迟"那条路
+                return 0;
+            }
+        }
+
         long now = System.currentTimeMillis();
         if (t != 0) {
             holdTurn = t;
@@ -1075,6 +1280,42 @@ public class OverlayService extends Service {
                 handle.setOnTouchListener(new ResizeTouch());
             }
 
+            if (!editMode) {
+                // 右上角 ✕：自绘（字体加粗在车机上仍偏细），笔画 4.5dp + 深色描边阴影
+                CloseXView x = new CloseXView(OverlayService.this);
+                x.setContentDescription("关闭摄像头");
+                int xs = dp(64);
+                FrameLayout.LayoutParams xp = new FrameLayout.LayoutParams(xs, xs, Gravity.START | Gravity.TOP);
+                xp.topMargin = dp(2);
+                xp.leftMargin = dp(4);
+                x.setLayoutParams(xp);
+                x.setVisibility(View.GONE);
+                x.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) { dismissSide(idx); }
+                });
+                box.addView(x);
+                s.closeBtn = x;
+
+                // 右下角缩放把手：与 ✕ 同风格（无背景、半透明白 + 阴影）
+                TextView rz = new TextView(OverlayService.this);
+                rz.setText("◢");
+                rz.setTextSize(28f);
+                rz.setTypeface(Typeface.DEFAULT_BOLD);
+                rz.setTextColor(0xAAFFFFFF);
+                rz.setGravity(Gravity.CENTER);
+                rz.setContentDescription("缩放摄像头");
+                int rs = dp(48);
+                FrameLayout.LayoutParams rp = new FrameLayout.LayoutParams(rs, rs, Gravity.END | Gravity.BOTTOM);
+                rz.setLayoutParams(rp);
+                rz.setVisibility(View.GONE);
+                rz.setOnTouchListener(new CamResize());
+                box.addView(rz);
+                s.resizeBtn = rz;
+
+                // 单指拖动移动（与「编辑布局」互不影响）
+                box.setOnTouchListener(new CamTouch());
+            }
+
             int fullH = Math.max(dp(112), (int) (camW / CAM_ASPECT + 0.5f));
             // 正常使用：一律先按"隐藏态"建窗（64x36 + 近全透明），
             // 等解码器真的画出第一帧再 moveSide(idx,true) 显形 —— 否则新起的流会先黑一下。
@@ -1086,6 +1327,7 @@ public class OverlayService extends Service {
                     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                             | (editMode ? 0 : WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                             | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                     PixelFormat.OPAQUE);
             lp.gravity = Gravity.TOP | Gravity.START;
@@ -1137,15 +1379,39 @@ public class OverlayService extends Service {
                 lp.alpha = onScreen ? 1f : HIDDEN_ALPHA;
                 lp.width = onScreen ? camW : HIDDEN_W;
                 lp.height = onScreen ? Math.max(dp(112), (int) (camW / CAM_ASPECT + 0.5f)) : HIDDEN_H;
+                // 只有"显示中"才接收触摸；隐藏时是 64×36 的小窗，必须 NOT_TOUCHABLE，否则会吞掉点击。
+                // NOT_TOUCH_MODAL：窗口外的触摸照常落到下面的应用。
+                int fl = lp.flags | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;
+                if (onScreen) fl &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+                else fl |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+                lp.flags = fl;
             }
             wm.updateViewLayout(s.view, lp);
             s.onScreen = onScreen;
+            if (s.closeBtn != null) {
+                s.closeBtn.setVisibility(onScreen && !editMode ? View.VISIBLE : View.GONE);
+            }
+            if (s.resizeBtn != null) {
+                s.resizeBtn.setVisibility(onScreen && !editMode ? View.VISIBLE : View.GONE);
+            }
             long f = (s.player != null) ? s.player.frames() : -1;
             Log.i(TAG, "[cam] " + (onScreen ? "显示 " : "隐藏 ")
                     + (idx == SIDE_LEFT ? "左" : "右") + "  frames=" + f);
         } catch (Throwable t) {
             Log.e(TAG, "[cam] moveSide 失败: " + t);
         }
+    }
+
+    /** 用户点了 ✕：立刻收起，并在本次转向灯周期内不再自动弹出。 */
+    private void dismissSide(int idx) {
+        dismissedSide = idx;
+        dismissedWaitOff = true;
+        holdTurn = 0;                 // 不走"灭灯延迟"那条路
+        CamSide s = sides[idx];
+        if (s.closeBtn != null) s.closeBtn.setVisibility(View.GONE);
+        moveSide(idx, false);
+        Log.i(TAG, "[cam] 用户关闭 " + (idx == SIDE_LEFT ? "左" : "右")
+                + "，本次转向周期内不再显示");
     }
 
     /**
